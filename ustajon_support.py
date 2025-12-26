@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-UstajonSupport Client - Windows Desktop Application v2.1
-Professional remote support client with modern UI
-- RustDesk mavjud bo'lsa qayta o'rnatmaydi
-- Telefon raqam bo'yicha identifikatsiya (dublikat oldini olish)
-- Server bilan sinxronizatsiya
-Build: pyinstaller --onefile --windowed --icon=icon.ico --name=UstajonSupport ustajon_support.py
+UstajonSupport Client v3.0 - Professional Windows Application
+Modern glassmorphism UI with full functionality
 """
 import os
 import sys
@@ -17,545 +13,669 @@ import threading
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, font as tkfont
 import uuid
-import logging
 import hashlib
+import logging
 from datetime import datetime
+import ctypes
 
-# ============ SOZLAMALAR ============
-VERSION = "2.1.0"
+# ============ CONSTANTS ============
+VERSION = "3.0.0"
+APP_NAME = "UstajonSupport"
 SERVER_URL = "http://31.220.75.75"
 RUSTDESK_KEY = "YHo+N4vp+ZWP7wedLh69zCGk3aFf4935hwDKX9OdFXE="
 RUSTDESK_SERVER = "31.220.75.75"
 RUSTDESK_PASSWORD = "ustajon2025"
 RUSTDESK_URL = "https://github.com/rustdesk/rustdesk/releases/download/1.2.3/rustdesk-1.2.3-x86_64.exe"
 
-# Local storage
-APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", "."), "UstajonSupport")
-os.makedirs(APP_DATA_DIR, exist_ok=True)
-LOCAL_CONFIG = os.path.join(APP_DATA_DIR, "config.json")
+# Colors - Modern Dark Theme
+COLORS = {
+    "bg_dark": "#0a0a0f",
+    "bg_card": "#12121a",
+    "bg_input": "#1a1a25",
+    "bg_hover": "#252535",
+    "accent": "#6366f1",
+    "accent_light": "#818cf8",
+    "accent_glow": "#4f46e5",
+    "success": "#10b981",
+    "warning": "#f59e0b",
+    "error": "#ef4444",
+    "text": "#ffffff",
+    "text_secondary": "#94a3b8",
+    "text_muted": "#64748b",
+    "border": "#2d2d3d",
+    "border_focus": "#6366f1"
+}
 
-# Logging
+# App Data Directory
+APP_DATA = os.path.join(os.environ.get("APPDATA", "."), APP_NAME)
+os.makedirs(APP_DATA, exist_ok=True)
+CONFIG_FILE = os.path.join(APP_DATA, "config.json")
+LOG_FILE = os.path.join(APP_DATA, "app.log")
+
+# Setup logging
 logging.basicConfig(
-    filename=os.path.join(APP_DATA_DIR, "support.log"),
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler()
+    ]
 )
+logger = logging.getLogger(__name__)
 
 
-def load_local_config():
-    """Lokal konfiguratsiyani yuklash"""
-    try:
-        if os.path.exists(LOCAL_CONFIG):
-            with open(LOCAL_CONFIG, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
+class Config:
+    """Local configuration manager"""
+    def __init__(self):
+        self.data = self._load()
+    
+    def _load(self):
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Config load error: {e}")
+        return {}
+    
+    def save(self):
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Config save error: {e}")
+    
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+    
+    def set(self, key, value):
+        self.data[key] = value
+        self.save()
 
 
-def save_local_config(config):
-    """Lokal konfiguratsiyani saqlash"""
-    try:
-        with open(LOCAL_CONFIG, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logging.error(f"Config saqlashda xatolik: {e}")
-
-
-class ModernButton(tk.Canvas):
-    """Zamonaviy animatsiyali tugma"""
-    def __init__(self, parent, text, command, bg="#00d4ff", fg="#000000", width=380, height=50):
-        super().__init__(parent, width=width, height=height, bg=parent["bg"], highlightthickness=0)
-        self.command = command
-        self.bg_color = bg
-        self.fg_color = fg
+class GradientButton(tk.Canvas):
+    """Modern gradient button with hover effects"""
+    def __init__(self, parent, text, command, width=360, height=52, 
+                 gradient=("6366f1", "8b5cf6"), **kwargs):
+        super().__init__(parent, width=width, height=height, 
+                        bg=COLORS["bg_card"], highlightthickness=0, **kwargs)
         self.text = text
+        self.command = command
         self.width = width
         self.height = height
+        self.gradient = gradient
         self.enabled = True
+        self.hover = False
         
-        self.draw_button()
-        self.bind("<Enter>", self.on_enter)
-        self.bind("<Leave>", self.on_leave)
-        self.bind("<Button-1>", self.on_click)
+        self._draw()
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<ButtonRelease-1>", self._on_release)
         
-    def draw_button(self, hover=False):
+    def _draw(self):
         self.delete("all")
-        color = self.lighten(self.bg_color, 20) if hover else self.bg_color
-        r = 12
-        self.create_polygon(
-            r, 0, self.width-r, 0, self.width, r, self.width, self.height-r,
-            self.width-r, self.height, r, self.height, 0, self.height-r, 0, r,
-            fill=color, outline=""
-        )
-        self.create_text(self.width//2, self.height//2, text=self.text, 
-                        fill=self.fg_color, font=("Segoe UI", 13, "bold"))
         
-    def lighten(self, color, amount):
-        color = color.lstrip('#')
-        r = min(255, int(color[0:2], 16) + amount)
-        g = min(255, int(color[2:4], 16) + amount)
-        b = min(255, int(color[4:6], 16) + amount)
-        return f"#{r:02x}{g:02x}{b:02x}"
-        
-    def on_enter(self, e):
+        # Draw gradient background
+        r = 14  # border radius
         if self.enabled:
-            self.draw_button(hover=True)
-            
-    def on_leave(self, e):
-        self.draw_button(hover=False)
+            c1, c2 = self.gradient if not self.hover else ("818cf8", "a78bfa")
+        else:
+            c1, c2 = ("4b5563", "6b7280")
         
-    def on_click(self, e):
+        # Simple gradient simulation with two colors
+        self.create_polygon(
+            r, 0, self.width-r, 0,
+            self.width, r, self.width, self.height-r,
+            self.width-r, self.height, r, self.height,
+            0, self.height-r, 0, r,
+            fill=f"#{c1}", outline="", smooth=True
+        )
+        
+        # Add glow effect on hover
+        if self.hover and self.enabled:
+            self.create_polygon(
+                r+2, 2, self.width-r-2, 2,
+                self.width-2, r+2, self.width-2, self.height-r-2,
+                self.width-r-2, self.height-2, r+2, self.height-2,
+                2, self.height-r-2, 2, r+2,
+                fill="", outline=f"#{c2}", width=2, smooth=True
+            )
+        
+        # Text
+        self.create_text(
+            self.width//2, self.height//2,
+            text=self.text, fill="#ffffff",
+            font=("Segoe UI", 13, "bold")
+        )
+        
+    def _on_enter(self, e):
+        if self.enabled:
+            self.hover = True
+            self._draw()
+            self.config(cursor="hand2")
+    
+    def _on_leave(self, e):
+        self.hover = False
+        self._draw()
+        self.config(cursor="")
+    
+    def _on_click(self, e):
+        if self.enabled:
+            self.config(cursor="hand2")
+    
+    def _on_release(self, e):
         if self.enabled and self.command:
             self.command()
-            
+    
     def set_text(self, text):
         self.text = text
-        self.draw_button()
-        
+        self._draw()
+    
     def set_enabled(self, enabled):
         self.enabled = enabled
-        if not enabled:
-            self.bg_color = "#555555"
-        self.draw_button()
+        self._draw()
+    
+    def set_gradient(self, gradient):
+        self.gradient = gradient
+        self._draw()
+
+
+class ModernEntry(tk.Frame):
+    """Modern entry with icon and floating label effect"""
+    def __init__(self, parent, label, icon="", placeholder="", **kwargs):
+        super().__init__(parent, bg=COLORS["bg_card"])
         
-    def set_color(self, bg):
-        self.bg_color = bg
-        self.draw_button()
+        self.label_text = label
+        self.placeholder = placeholder
+        
+        # Label
+        tk.Label(self, text=f"{icon} {label}" if icon else label,
+                font=("Segoe UI", 10, "bold"), fg=COLORS["text_secondary"],
+                bg=COLORS["bg_card"]).pack(anchor="w", pady=(0, 6))
+        
+        # Entry container
+        self.entry_frame = tk.Frame(self, bg=COLORS["bg_input"], 
+                                   highlightthickness=2,
+                                   highlightbackground=COLORS["border"],
+                                   highlightcolor=COLORS["accent"])
+        self.entry_frame.pack(fill="x")
+        
+        # Entry
+        self.var = tk.StringVar()
+        self.entry = tk.Entry(
+            self.entry_frame, textvariable=self.var,
+            font=("Segoe UI", 12), bg=COLORS["bg_input"],
+            fg=COLORS["text"], insertbackground=COLORS["accent"],
+            relief="flat", bd=12
+        )
+        self.entry.pack(fill="x", padx=2, pady=2)
+        
+        # Placeholder
+        if placeholder:
+            self.var.set(placeholder)
+            self.entry.bind("<FocusIn>", self._on_focus_in)
+            self.entry.bind("<FocusOut>", self._on_focus_out)
+    
+    def _on_focus_in(self, e):
+        if self.var.get() == self.placeholder:
+            self.var.set("")
+            self.entry.config(fg=COLORS["text"])
+    
+    def _on_focus_out(self, e):
+        if not self.var.get():
+            self.var.set(self.placeholder)
+            self.entry.config(fg=COLORS["text_muted"])
+    
+    def get(self):
+        val = self.var.get()
+        return "" if val == self.placeholder else val
+    
+    def set(self, value):
+        self.var.set(value)
+        if value and value != self.placeholder:
+            self.entry.config(fg=COLORS["text"])
 
 
-class AnimatedProgress(tk.Canvas):
-    """Animatsiyali progress bar"""
-    def __init__(self, parent, width=300, height=6):
-        super().__init__(parent, width=width, height=height, bg=parent["bg"], highlightthickness=0)
+class ModernCombobox(tk.Frame):
+    """Modern styled combobox"""
+    def __init__(self, parent, label, values, icon=""):
+        super().__init__(parent, bg=COLORS["bg_card"])
+        
+        # Label
+        tk.Label(self, text=f"{icon} {label}" if icon else label,
+                font=("Segoe UI", 10, "bold"), fg=COLORS["text_secondary"],
+                bg=COLORS["bg_card"]).pack(anchor="w", pady=(0, 6))
+        
+        # Combobox container
+        container = tk.Frame(self, bg=COLORS["bg_input"],
+                           highlightthickness=2,
+                           highlightbackground=COLORS["border"],
+                           highlightcolor=COLORS["accent"])
+        container.pack(fill="x")
+        
+        # Style
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Modern.TCombobox",
+                       fieldbackground=COLORS["bg_input"],
+                       background=COLORS["bg_input"],
+                       foreground=COLORS["text"],
+                       arrowcolor=COLORS["accent"],
+                       borderwidth=0,
+                       relief="flat")
+        style.map("Modern.TCombobox",
+                 fieldbackground=[("readonly", COLORS["bg_input"])],
+                 selectbackground=[("readonly", COLORS["accent"])],
+                 selectforeground=[("readonly", "#ffffff")])
+        
+        self.var = tk.StringVar(value=values[0] if values else "")
+        self.combo = ttk.Combobox(
+            container, textvariable=self.var, values=values,
+            font=("Segoe UI", 11), style="Modern.TCombobox",
+            state="readonly"
+        )
+        self.combo.pack(fill="x", padx=8, pady=10)
+    
+    def get(self):
+        return self.var.get()
+
+
+class ProgressIndicator(tk.Canvas):
+    """Animated progress indicator"""
+    def __init__(self, parent, width=300, height=4):
+        super().__init__(parent, width=width, height=height,
+                        bg=COLORS["bg_card"], highlightthickness=0)
         self.width = width
         self.height = height
         self.running = False
-        self.position = 0
+        self.pos = 0
         
     def start(self):
         self.running = True
-        self.animate()
-        
+        self._animate()
+    
     def stop(self):
         self.running = False
         self.delete("all")
-        
-    def animate(self):
+    
+    def _animate(self):
         if not self.running:
             return
         self.delete("all")
-        self.create_rectangle(0, 0, self.width, self.height, fill="#2d2d44", outline="")
-        bar_width = 80
-        x = self.position % (self.width + bar_width) - bar_width
-        self.create_rectangle(x, 0, x + bar_width, self.height, fill="#00d4ff", outline="")
-        self.position += 5
-        self.after(30, self.animate)
-
-
-class StatusLabel(tk.Label):
-    """Animatsiyali status label"""
-    def __init__(self, parent, **kwargs):
-        super().__init__(parent, **kwargs)
-        self.dots = 0
-        self.base_text = ""
-        self.animating = False
         
-    def set_status(self, text, color="#888888", animate=False):
-        self.base_text = text
-        self.config(text=text, fg=color)
-        if animate and not self.animating:
-            self.animating = True
-            self.animate_dots()
-        elif not animate:
-            self.animating = False
-            
-    def animate_dots(self):
-        if not self.animating:
-            return
-        self.dots = (self.dots + 1) % 4
-        self.config(text=self.base_text + "." * self.dots)
-        self.after(500, self.animate_dots)
+        # Background
+        self.create_rectangle(0, 0, self.width, self.height,
+                            fill=COLORS["bg_input"], outline="")
+        
+        # Moving gradient bar
+        bar_width = 100
+        x = (self.pos % (self.width + bar_width)) - bar_width
+        
+        # Create gradient effect
+        for i in range(bar_width):
+            alpha = 1 - abs(i - bar_width/2) / (bar_width/2)
+            color = self._blend_color(COLORS["bg_input"], COLORS["accent"], alpha)
+            self.create_line(x + i, 0, x + i, self.height, fill=color)
+        
+        self.pos += 4
+        self.after(20, self._animate)
+    
+    def _blend_color(self, c1, c2, alpha):
+        c1 = c1.lstrip('#')
+        c2 = c2.lstrip('#')
+        r = int(int(c1[0:2], 16) * (1-alpha) + int(c2[0:2], 16) * alpha)
+        g = int(int(c1[2:4], 16) * (1-alpha) + int(c2[2:4], 16) * alpha)
+        b = int(int(c1[4:6], 16) * (1-alpha) + int(c2[4:6], 16) * alpha)
+        return f"#{r:02x}{g:02x}{b:02x}"
 
 
-class UstajonSupport:
+class StatusBadge(tk.Frame):
+    """Status indicator badge"""
+    def __init__(self, parent, text="Tayyor", status="default"):
+        super().__init__(parent, bg=COLORS["bg_card"])
+        
+        self.dot = tk.Canvas(self, width=10, height=10, 
+                            bg=COLORS["bg_card"], highlightthickness=0)
+        self.dot.pack(side="left", padx=(0, 8))
+        
+        self.label = tk.Label(self, text=text, font=("Segoe UI", 10),
+                             fg=COLORS["text_secondary"], bg=COLORS["bg_card"])
+        self.label.pack(side="left")
+        
+        self.set_status(status, text)
+    
+    def set_status(self, status, text=None):
+        colors = {
+            "default": COLORS["text_muted"],
+            "loading": COLORS["warning"],
+            "success": COLORS["success"],
+            "error": COLORS["error"],
+            "online": COLORS["success"]
+        }
+        color = colors.get(status, COLORS["text_muted"])
+        
+        self.dot.delete("all")
+        self.dot.create_oval(1, 1, 9, 9, fill=color, outline="")
+        
+        if text:
+            self.label.config(text=text, fg=color)
+
+
+class UstajonSupportApp:
+    """Main Application"""
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title(f"UstajonSupport v{VERSION}")
-        self.root.geometry("480x650")
+        self.root.title(f"{APP_NAME} v{VERSION}")
+        self.root.geometry("520x720")
         self.root.resizable(False, False)
-        self.root.configure(bg="#0f0f1a")
+        self.root.configure(bg=COLORS["bg_dark"])
         
-        self.center_window()
+        # Center window
+        self._center_window()
         
-        # Load saved config
-        self.local_config = load_local_config()
+        # Try to set DPI awareness on Windows
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except:
+            pass
         
-        # Variables
-        self.name_var = tk.StringVar(value=self.local_config.get("name", ""))
-        self.phone_var = tk.StringVar(value=self.local_config.get("phone", "+998"))
-        self.problem_var = tk.StringVar(value="Kompyuter sekin ishlayapti")
-        self.rustdesk_id = self.local_config.get("rustdesk_id", None)
-        self.client_id = self.local_config.get("client_id", None)
-        self.connection_status = "disconnected"
-        self.already_registered = self.local_config.get("registered", False)
+        # Config
+        self.config = Config()
         
-        self.setup_ui()
-        logging.info(f"UstajonSupport v{VERSION} ishga tushdi")
+        # State
+        self.client_id = None
+        self.rustdesk_id = self.config.get("rustdesk_id")
+        self.is_registered = self.config.get("registered", False)
+        self.is_connected = False
+        self.heartbeat_thread = None
         
-        # Agar oldin ro'yxatdan o'tgan bo'lsa
-        if self.already_registered and self.rustdesk_id:
-            self.check_existing_registration()
+        # Build UI
+        self._build_ui()
         
-    def center_window(self):
+        logger.info(f"{APP_NAME} v{VERSION} started")
+        
+        # Check existing registration
+        if self.is_registered:
+            self._check_existing()
+    
+    def _center_window(self):
         self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() - 480) // 2
-        y = (self.root.winfo_screenheight() - 650) // 2
-        self.root.geometry(f"480x650+{x}+{y}")
-        
-    def setup_ui(self):
-        main = tk.Frame(self.root, bg="#0f0f1a")
-        main.pack(fill="both", expand=True, padx=40, pady=30)
+        w, h = 520, 720
+        x = (self.root.winfo_screenwidth() - w) // 2
+        y = (self.root.winfo_screenheight() - h) // 2
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+    
+    def _build_ui(self):
+        # Main container
+        main = tk.Frame(self.root, bg=COLORS["bg_dark"])
+        main.pack(fill="both", expand=True, padx=30, pady=25)
         
         # === HEADER ===
-        header = tk.Frame(main, bg="#0f0f1a")
+        header = tk.Frame(main, bg=COLORS["bg_dark"])
         header.pack(fill="x", pady=(0, 20))
         
-        logo_canvas = tk.Canvas(header, width=80, height=80, bg="#0f0f1a", highlightthickness=0)
-        logo_canvas.pack()
-        logo_canvas.create_oval(5, 5, 75, 75, fill="#00d4ff", outline="")
-        logo_canvas.create_text(40, 40, text="U", font=("Segoe UI", 32, "bold"), fill="#0f0f1a")
+        # Logo
+        logo_frame = tk.Frame(header, bg=COLORS["bg_dark"])
+        logo_frame.pack()
         
-        tk.Label(header, text="UstajonSupport", font=("Segoe UI", 26, "bold"),
-                fg="#ffffff", bg="#0f0f1a").pack(pady=(15, 2))
-        tk.Label(header, text="Professional kompyuter yordam xizmati", 
-                font=("Segoe UI", 10), fg="#666666", bg="#0f0f1a").pack()
+        logo = tk.Canvas(logo_frame, width=90, height=90, 
+                        bg=COLORS["bg_dark"], highlightthickness=0)
+        logo.pack()
         
-        # === STATUS BANNER (agar oldin ro'yxatdan o'tgan bo'lsa) ===
-        if self.already_registered and self.rustdesk_id:
-            banner = tk.Frame(main, bg="#1a3a1a", padx=15, pady=10)
+        # Draw logo with gradient effect
+        logo.create_oval(5, 5, 85, 85, fill=COLORS["accent"], outline="")
+        logo.create_oval(10, 10, 80, 80, fill=COLORS["bg_dark"], outline="")
+        logo.create_oval(15, 15, 75, 75, fill=COLORS["accent"], outline="")
+        logo.create_text(45, 45, text="U", font=("Segoe UI", 32, "bold"),
+                        fill="#ffffff")
+        
+        # Title
+        tk.Label(header, text=APP_NAME, font=("Segoe UI", 28, "bold"),
+                fg=COLORS["text"], bg=COLORS["bg_dark"]).pack(pady=(15, 4))
+        tk.Label(header, text="Professional kompyuter xizmati",
+                font=("Segoe UI", 11), fg=COLORS["text_muted"],
+                bg=COLORS["bg_dark"]).pack()
+        
+        # === REGISTERED BANNER ===
+        if self.is_registered and self.rustdesk_id:
+            banner = tk.Frame(main, bg="#1a2e1a", padx=16, pady=12)
             banner.pack(fill="x", pady=(0, 15))
-            tk.Label(banner, text=f"✅ Siz allaqachon ro'yxatdan o'tgansiz", 
-                    font=("Segoe UI", 10, "bold"), fg="#00ff00", bg="#1a3a1a").pack()
-            tk.Label(banner, text=f"RustDesk ID: {self.rustdesk_id}", 
-                    font=("Segoe UI", 9), fg="#88ff88", bg="#1a3a1a").pack()
+            
+            tk.Label(banner, text="✓ Siz ro'yxatdan o'tgansiz",
+                    font=("Segoe UI", 11, "bold"), fg=COLORS["success"],
+                    bg="#1a2e1a").pack(anchor="w")
+            tk.Label(banner, text=f"RustDesk ID: {self.rustdesk_id}",
+                    font=("Segoe UI", 10), fg="#86efac",
+                    bg="#1a2e1a").pack(anchor="w")
         
-        # === FORM ===
-        form = tk.Frame(main, bg="#0f0f1a")
-        form.pack(fill="x", pady=(10, 0))
+        # === FORM CARD ===
+        card = tk.Frame(main, bg=COLORS["bg_card"], padx=25, pady=25)
+        card.pack(fill="x")
         
-        entry_style = {"font": ("Segoe UI", 12), "bg": "#1a1a2e", "fg": "#ffffff",
-                      "insertbackground": "#00d4ff", "relief": "flat", 
-                      "highlightthickness": 2, "highlightbackground": "#2d2d44",
-                      "highlightcolor": "#00d4ff"}
+        # Name input
+        self.name_entry = ModernEntry(card, "Ismingiz", icon="👤", 
+                                      placeholder="To'liq ismingiz")
+        self.name_entry.pack(fill="x", pady=(0, 18))
         
-        # Name
-        name_frame = tk.Frame(form, bg="#0f0f1a")
-        name_frame.pack(fill="x", pady=(0, 15))
-        tk.Label(name_frame, text="👤 Ismingiz", font=("Segoe UI", 10, "bold"),
-                fg="#aaaaaa", bg="#0f0f1a", anchor="w").pack(fill="x")
-        name_entry = tk.Entry(name_frame, textvariable=self.name_var, **entry_style)
-        name_entry.pack(fill="x", pady=(5, 0), ipady=12)
+        # Load saved name
+        if self.config.get("name"):
+            self.name_entry.set(self.config.get("name"))
         
-        # Phone (ASOSIY IDENTIFIKATOR)
-        phone_frame = tk.Frame(form, bg="#0f0f1a")
-        phone_frame.pack(fill="x", pady=(0, 15))
-        tk.Label(phone_frame, text="📱 Telefon raqam (asosiy identifikator)", 
-                font=("Segoe UI", 10, "bold"), fg="#aaaaaa", bg="#0f0f1a", anchor="w").pack(fill="x")
-        phone_entry = tk.Entry(phone_frame, textvariable=self.phone_var, **entry_style)
-        phone_entry.pack(fill="x", pady=(5, 0), ipady=12)
+        # Phone input
+        self.phone_entry = ModernEntry(card, "Telefon raqam", icon="📱",
+                                       placeholder="+998")
+        self.phone_entry.pack(fill="x", pady=(0, 18))
         
-        # Problem
-        problem_frame = tk.Frame(form, bg="#0f0f1a")
-        problem_frame.pack(fill="x", pady=(0, 25))
-        tk.Label(problem_frame, text="🔧 Muammo turi", font=("Segoe UI", 10, "bold"),
-                fg="#aaaaaa", bg="#0f0f1a", anchor="w").pack(fill="x")
+        # Load saved phone
+        if self.config.get("phone"):
+            self.phone_entry.set(self.config.get("phone"))
+        else:
+            self.phone_entry.set("+998")
         
+        # Problem selector
         problems = [
-            "Kompyuter sekin ishlayapti",
-            "Virus tekshirish kerak",
-            "Dastur o'rnatish",
-            "Internet ishlamayapti",
-            "Windows muammosi",
-            "Office dasturlari",
-            "Printer sozlash",
-            "Boshqa muammo"
+            "💻 Kompyuter sekin ishlayapti",
+            "🦠 Virus tekshirish",
+            "📦 Dastur o'rnatish",
+            "🌐 Internet muammosi",
+            "🪟 Windows muammosi",
+            "📄 Office dasturlari",
+            "🖨️ Printer sozlash",
+            "❓ Boshqa muammo"
         ]
+        self.problem_combo = ModernCombobox(card, "Muammo turi", problems, icon="🔧")
+        self.problem_combo.pack(fill="x", pady=(0, 25))
         
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure("Custom.TCombobox", 
-                       fieldbackground="#1a1a2e",
-                       background="#1a1a2e",
-                       foreground="#ffffff",
-                       arrowcolor="#00d4ff")
+        # Submit button
+        btn_text = "🔄 Qayta ulanish" if self.is_registered else "🚀 Yordam so'rash"
+        self.submit_btn = GradientButton(card, btn_text, self._on_submit)
+        self.submit_btn.pack()
         
-        combo = ttk.Combobox(problem_frame, textvariable=self.problem_var, 
-                            values=problems, font=("Segoe UI", 11), 
-                            state="readonly", style="Custom.TCombobox")
-        combo.pack(fill="x", pady=(5, 0), ipady=10)
+        # Progress
+        self.progress = ProgressIndicator(card, width=360)
         
-        # === BUTTON ===
-        btn_text = "🔄 Qayta ulanish" if self.already_registered else "🚀 Yordam olish"
-        self.btn = ModernButton(form, text=btn_text, command=self.start_support)
-        self.btn.pack(pady=(10, 0))
-        
-        # === STATUS ===
-        status_frame = tk.Frame(main, bg="#0f0f1a")
+        # Status
+        status_frame = tk.Frame(card, bg=COLORS["bg_card"])
         status_frame.pack(fill="x", pady=(20, 0))
+        self.status = StatusBadge(status_frame, "Tayyor", "default")
+        self.status.pack()
         
-        self.status_label = StatusLabel(status_frame, text="Tayyor", 
-                                        font=("Segoe UI", 10), fg="#666666", bg="#0f0f1a")
-        self.status_label.pack()
+        # === INFO SECTION ===
+        info = tk.Frame(main, bg=COLORS["bg_card"], padx=20, pady=18)
+        info.pack(fill="x", pady=(20, 0))
         
-        self.progress = AnimatedProgress(status_frame)
+        tk.Label(info, text="ℹ️ Qanday ishlaydi?", font=("Segoe UI", 11, "bold"),
+                fg=COLORS["accent_light"], bg=COLORS["bg_card"]).pack(anchor="w")
         
-        # === INFO BOX ===
-        info_frame = tk.Frame(main, bg="#1a1a2e", padx=15, pady=15)
-        info_frame.pack(fill="x", pady=(20, 0))
-        
-        tk.Label(info_frame, text="ℹ️ Muhim ma'lumot", font=("Segoe UI", 11, "bold"),
-                fg="#00d4ff", bg="#1a1a2e", anchor="w").pack(fill="x")
-        
-        info_texts = [
-            "• RustDesk o'rnatilgan bo'lsa qayta o'rnatilmaydi",
-            "• Telefon raqam orqali identifikatsiya qilinadi",
-            "• Bir xil raqam bilan bir marta ro'yxatdan o'tiladi",
-            "• Admin panelda o'chirilsa, qayta ro'yxatdan o'tish mumkin"
+        steps = [
+            "1. Ma'lumotlaringizni kiriting",
+            "2. \"Yordam so'rash\" tugmasini bosing",
+            "3. RustDesk avtomatik sozlanadi",
+            "4. Mutaxassis kompyuteringizga ulanadi"
         ]
-        for text in info_texts:
-            tk.Label(info_frame, text=text, font=("Segoe UI", 9),
-                    fg="#888888", bg="#1a1a2e", anchor="w").pack(fill="x", pady=(2, 0))
+        for step in steps:
+            tk.Label(info, text=step, font=("Segoe UI", 9),
+                    fg=COLORS["text_muted"], bg=COLORS["bg_card"]).pack(anchor="w", pady=1)
         
         # === FOOTER ===
-        footer = tk.Frame(main, bg="#0f0f1a")
-        footer.pack(side="bottom", fill="x", pady=(15, 0))
+        footer = tk.Frame(main, bg=COLORS["bg_dark"])
+        footer.pack(side="bottom", fill="x", pady=(20, 0))
         
-        tk.Label(footer, text=f"v{VERSION} • Telegram: @ustajonbot", 
-                font=("Segoe UI", 8), fg="#444444", bg="#0f0f1a").pack()
-        
-    def check_existing_registration(self):
-        """Serverda ro'yxatdan o'tganligini tekshirish"""
-        try:
-            phone = self.local_config.get("phone", "")
-            if phone:
-                # Serverdan tekshirish
-                data = urllib.parse.urlencode({"phone": phone}).encode("utf-8")
-                req = urllib.request.Request(f"{SERVER_URL}/api/client/check", data=data)
+        tk.Label(footer, text=f"v{VERSION} • Telegram: @ustajonbot",
+                font=("Segoe UI", 9), fg=COLORS["text_muted"],
+                bg=COLORS["bg_dark"]).pack()
+    
+    def _check_existing(self):
+        """Check if still registered on server"""
+        def check():
+            try:
+                phone = self.config.get("phone", "")
+                if not phone:
+                    return
+                
+                data = urllib.parse.urlencode({"phone": phone}).encode()
+                req = urllib.request.Request(f"{SERVER_URL}/api/client/check",
+                                            data=data, method="POST")
                 req.add_header("Content-Type", "application/x-www-form-urlencoded")
-                response = urllib.request.urlopen(req, timeout=10)
-                result = json.loads(response.read().decode("utf-8"))
+                
+                resp = urllib.request.urlopen(req, timeout=10)
+                result = json.loads(resp.read().decode())
                 
                 if result.get("exists") and result.get("active"):
-                    # Hali ham aktiv
-                    self.connection_status = "connected"
-                    self.start_heartbeat()
+                    self.is_connected = True
+                    self.root.after(0, lambda: self.status.set_status("online", "Online"))
+                    self._start_heartbeat()
                 elif result.get("exists") and not result.get("active"):
-                    # Admin tomonidan o'chirilgan
-                    self.already_registered = False
-                    self.local_config["registered"] = False
-                    save_local_config(self.local_config)
-                    messagebox.showinfo("Ma'lumot", 
-                        "Sizning so'rovingiz yakunlangan.\nYangi muammo bo'lsa qayta murojaat qiling.")
-        except Exception as e:
-            logging.warning(f"Ro'yxatni tekshirishda xatolik: {e}")
+                    self.config.set("registered", False)
+                    self.is_registered = False
+                    self.root.after(0, lambda: messagebox.showinfo("Ma'lumot",
+                        "Oldingi so'rovingiz yakunlangan.\nYangi muammo bo'lsa qayta murojaat qiling."))
+                    
+            except Exception as e:
+                logger.warning(f"Check existing error: {e}")
         
-    def start_support(self):
-        name = self.name_var.get().strip()
-        phone = self.phone_var.get().strip()
+        threading.Thread(target=check, daemon=True).start()
+    
+    def _on_submit(self):
+        name = self.name_entry.get().strip()
+        phone = self.phone_entry.get().strip()
         
+        # Validation
         if not name or len(name) < 2:
-            self.show_error("Ismingizni to'liq kiriting!")
-            return
-            
-        if not phone or len(phone) < 12:
-            self.show_error("Telefon raqamni to'liq kiriting!\nMasalan: +998901234567")
-            return
-            
-        if not phone.startswith("+998"):
-            self.show_error("Telefon +998 bilan boshlanishi kerak!")
+            messagebox.showerror("Xatolik", "Ismingizni kiriting!")
             return
         
-        # Telefon raqamdan client_id yaratish (unikal)
-        self.client_id = hashlib.md5(phone.encode()).hexdigest()[:12]
+        if not phone or len(phone) < 12 or not phone.startswith("+998"):
+            messagebox.showerror("Xatolik", 
+                "Telefon raqamni to'g'ri kiriting!\nMasalan: +998901234567")
+            return
         
-        self.btn.set_enabled(False)
-        self.btn.set_text("⏳ Kutib turing...")
+        # Generate client_id from phone (consistent)
+        self.client_id = hashlib.md5(phone.encode()).hexdigest()[:12].upper()
+        
+        # Disable button
+        self.submit_btn.set_enabled(False)
+        self.submit_btn.set_text("⏳ Kutib turing...")
         self.progress.pack(pady=(15, 0))
         self.progress.start()
         
-        logging.info(f"Yordam so'rovi: {name}, {phone}, client_id: {self.client_id}")
-        threading.Thread(target=self.setup_process, args=(name, phone), daemon=True).start()
+        logger.info(f"Starting support request: {name}, {phone}, client_id={self.client_id}")
         
-    def show_error(self, message):
-        self.status_label.set_status("❌ " + message.split("\n")[0], "#ff4444")
-        messagebox.showerror("Xatolik", message)
-        
-    def setup_process(self, name, phone):
+        # Start setup in background
+        threading.Thread(target=self._setup_process, args=(name, phone), daemon=True).start()
+    
+    def _update_status(self, status, text):
+        self.root.after(0, lambda: self.status.set_status(status, text))
+    
+    def _setup_process(self, name, phone):
         try:
-            # Step 1: RustDesk tekshirish
-            self.update_status("🔍 RustDesk tekshirilmoqda", "#ffaa00", True)
-            rustdesk_path = self.find_rustdesk()
-            rustdesk_was_installed = rustdesk_path is not None
+            # Step 1: Find RustDesk
+            self._update_status("loading", "RustDesk tekshirilmoqda...")
+            rustdesk_path = self._find_rustdesk()
+            was_installed = rustdesk_path is not None
             
-            # Step 2: Agar RustDesk yo'q bo'lsa o'rnatish
+            # Step 2: Download if needed
             if not rustdesk_path:
-                self.update_status("📥 RustDesk yuklanmoqda (bir martalik)", "#ffaa00", True)
-                rustdesk_path = self.download_rustdesk()
+                self._update_status("loading", "RustDesk yuklanmoqda...")
+                rustdesk_path = self._download_rustdesk()
                 if not rustdesk_path:
                     raise Exception("RustDesk yuklab bo'lmadi")
             else:
-                self.update_status("✅ RustDesk topildi, sozlanmoqda", "#00ff00", True)
+                self._update_status("loading", "RustDesk topildi, sozlanmoqda...")
             
-            # Step 3: Configure (faqat bizning serverga ulash)
-            self.update_status("⚙️ Server sozlanmoqda", "#ffaa00", True)
-            self.configure_rustdesk(rustdesk_path, rustdesk_was_installed)
+            # Step 3: Configure
+            self._update_status("loading", "Sozlanmoqda...")
+            self._configure_rustdesk(rustdesk_path)
             
-            # Step 4: ID olish
-            self.update_status("🔑 ID olinmoqda", "#ffaa00", True)
-            time.sleep(2 if rustdesk_was_installed else 4)
-            self.rustdesk_id = self.get_rustdesk_id()
-            logging.info(f"RustDesk ID: {self.rustdesk_id}")
+            # Step 4: Get ID
+            self._update_status("loading", "ID olinmoqda...")
+            time.sleep(3 if was_installed else 5)
+            self.rustdesk_id = self._get_rustdesk_id()
+            logger.info(f"RustDesk ID: {self.rustdesk_id}")
             
-            # Step 5: Serverga ro'yxatdan o'tish
-            self.update_status("🌐 Serverga ulanmoqda", "#ffaa00", True)
-            result = self.register_with_server(name, phone)
+            # Step 5: Register
+            self._update_status("loading", "Serverga ulanmoqda...")
+            result = self._register(name, phone)
             
             if result.get("success"):
-                # Lokal konfiguratsiyani saqlash
-                self.local_config = {
-                    "name": name,
-                    "phone": phone,
-                    "rustdesk_id": self.rustdesk_id,
-                    "client_id": self.client_id,
-                    "registered": True,
-                    "registered_at": datetime.now().isoformat()
-                }
-                save_local_config(self.local_config)
+                # Save config
+                self.config.set("name", name)
+                self.config.set("phone", phone)
+                self.config.set("client_id", self.client_id)
+                self.config.set("rustdesk_id", self.rustdesk_id)
+                self.config.set("registered", True)
+                self.config.set("registered_at", datetime.now().isoformat())
                 
-                self.update_status("✅ Muvaffaqiyatli ulandi!", "#00ff00", False)
-                self.connection_status = "connected"
-                self.already_registered = True
-                self.root.after(0, lambda: self.show_success(result))
-                self.start_heartbeat()
+                self._update_status("success", "Muvaffaqiyatli ulandi!")
+                self.is_registered = True
+                self.is_connected = True
+                
+                self.root.after(0, self._show_success)
+                self._start_heartbeat()
             else:
                 raise Exception(result.get("message", "Server xatoligi"))
                 
         except Exception as e:
-            logging.error(f"Xatolik: {str(e)}")
-            self.update_status(f"❌ Xatolik: {str(e)}", "#ff4444", False)
-            self.root.after(0, self.reset_button)
-            
-    def update_status(self, text, color, animate):
-        self.root.after(0, lambda: self.status_label.set_status(text, color, animate))
-        
-    def find_rustdesk(self):
-        """RustDesk o'rnatilganligini tekshirish"""
+            logger.error(f"Setup error: {e}")
+            self._update_status("error", f"Xatolik: {str(e)[:50]}")
+            self.root.after(0, self._reset_button)
+    
+    def _find_rustdesk(self):
         paths = [
             os.path.expandvars(r"%ProgramFiles%\RustDesk\rustdesk.exe"),
             os.path.expandvars(r"%ProgramFiles(x86)%\RustDesk\rustdesk.exe"),
             os.path.expandvars(r"%LOCALAPPDATA%\RustDesk\rustdesk.exe"),
             r"C:\Program Files\RustDesk\rustdesk.exe",
-            r"C:\Program Files (x86)\RustDesk\rustdesk.exe"
         ]
-        for path in paths:
-            if os.path.exists(path):
-                logging.info(f"RustDesk topildi: {path}")
-                return path
-        logging.info("RustDesk topilmadi")
+        for p in paths:
+            if os.path.exists(p):
+                logger.info(f"RustDesk found: {p}")
+                return p
         return None
-        
-    def download_rustdesk(self):
-        """RustDesk yuklab olish va o'rnatish"""
+    
+    def _download_rustdesk(self):
         try:
-            temp_path = os.path.join(os.environ.get("TEMP", "."), "rustdesk_setup.exe")
+            temp = os.path.join(os.environ.get("TEMP", "."), "rustdesk_setup.exe")
+            urllib.request.urlretrieve(RUSTDESK_URL, temp)
             
-            logging.info(f"RustDesk yuklanmoqda: {RUSTDESK_URL}")
-            urllib.request.urlretrieve(RUSTDESK_URL, temp_path)
-            
-            logging.info("RustDesk o'rnatilmoqda...")
-            result = subprocess.run(
-                [temp_path, "--silent-install"], 
-                capture_output=True, 
-                timeout=180,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            
+            subprocess.run([temp, "--silent-install"], capture_output=True, timeout=180,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             time.sleep(5)
-            return self.find_rustdesk()
-            
+            return self._find_rustdesk()
         except Exception as e:
-            logging.error(f"RustDesk yuklashda xatolik: {str(e)}")
+            logger.error(f"Download error: {e}")
             return None
-            
-    def configure_rustdesk(self, rustdesk_path, was_installed=False):
-        """RustDesk sozlash - mavjud bo'lsa faqat server config yangilash"""
-        try:
-            config_dir = os.path.join(os.environ.get("APPDATA", "."), "RustDesk", "config")
-            os.makedirs(config_dir, exist_ok=True)
-            
-            config_path = os.path.join(config_dir, "RustDesk2.toml")
-            
-            # Agar config mavjud bo'lsa, faqat server sozlamalarini yangilash
-            if was_installed and os.path.exists(config_path):
-                logging.info("Mavjud RustDesk config yangilanmoqda")
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        existing_config = f.read()
-                    
-                    # Faqat server sozlamalarini yangilash
-                    import re
-                    existing_config = re.sub(
-                        r'custom-rendezvous-server\s*=\s*"[^"]*"',
-                        f'custom-rendezvous-server = "{RUSTDESK_SERVER}"',
-                        existing_config
-                    )
-                    existing_config = re.sub(
-                        r'relay-server\s*=\s*"[^"]*"',
-                        f'relay-server = "{RUSTDESK_SERVER}"',
-                        existing_config
-                    )
-                    existing_config = re.sub(
-                        r'key\s*=\s*"[^"]*"',
-                        f'key = "{RUSTDESK_KEY}"',
-                        existing_config
-                    )
-                    
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        f.write(existing_config)
-                except Exception as e:
-                    logging.warning(f"Config yangilashda xatolik, yangi yoziladi: {e}")
-                    self.write_new_config(config_path)
-            else:
-                self.write_new_config(config_path)
-            
-            # Parol sozlash
-            try:
-                subprocess.run(
-                    [rustdesk_path, "--password", RUSTDESK_PASSWORD],
-                    capture_output=True, timeout=30,
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-                )
-            except:
-                pass
-                
-            # RustDesk ishga tushirish
-            subprocess.Popen(
-                [rustdesk_path],
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0x08000000
-            )
-            logging.info("RustDesk ishga tushirildi")
-            
-        except Exception as e:
-            logging.error(f"RustDesk sozlashda xatolik: {str(e)}")
-            raise
-            
-    def write_new_config(self, config_path):
-        """Yangi config yozish"""
-        config_content = f'''rendezvous_server = "{RUSTDESK_SERVER}"
+    
+    def _configure_rustdesk(self, path):
+        cfg_dir = os.path.join(os.environ.get("APPDATA", "."), "RustDesk", "config")
+        os.makedirs(cfg_dir, exist_ok=True)
+        
+        config = f'''rendezvous_server = "{RUSTDESK_SERVER}"
 nat_type = 1
 serial = 0
 
@@ -565,71 +685,65 @@ relay-server = "{RUSTDESK_SERVER}"
 key = "{RUSTDESK_KEY}"
 direct-server = "Y"
 '''
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(config_content)
-        logging.info(f"Yangi config saqlandi: {config_path}")
-            
-    def get_rustdesk_id(self):
-        """RustDesk ID olish"""
-        config_path = os.path.join(
-            os.environ.get("APPDATA", "."), 
-            "RustDesk", "config", "RustDesk.toml"
-        )
+        with open(os.path.join(cfg_dir, "RustDesk2.toml"), "w") as f:
+            f.write(config)
         
-        for attempt in range(15):
+        try:
+            subprocess.run([path, "--password", RUSTDESK_PASSWORD], 
+                          capture_output=True, timeout=30,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except:
+            pass
+        
+        subprocess.Popen([path], creationflags=0x08000000)
+        logger.info("RustDesk configured and started")
+    
+    def _get_rustdesk_id(self):
+        cfg = os.path.join(os.environ.get("APPDATA", "."), "RustDesk", "config", "RustDesk.toml")
+        
+        for _ in range(15):
             try:
-                if os.path.exists(config_path):
-                    with open(config_path, "r", encoding="utf-8") as f:
+                if os.path.exists(cfg):
+                    with open(cfg, "r") as f:
                         for line in f:
                             if line.strip().startswith("id"):
-                                parts = line.split("=")
-                                if len(parts) >= 2:
-                                    id_value = parts[1].strip().strip("'\"")
-                                    if id_value and len(id_value) >= 6:
-                                        return id_value
-            except Exception as e:
-                logging.warning(f"ID olishda xatolik (urinish {attempt+1}): {str(e)}")
+                                id_val = line.split("=")[1].strip().strip("'\"")
+                                if id_val and len(id_val) >= 6:
+                                    return id_val
+            except:
+                pass
             time.sleep(1)
-            
-        fallback_id = str(uuid.uuid4())[:9].upper().replace("-", "")
-        logging.warning(f"Fallback ID: {fallback_id}")
-        return fallback_id
         
-    def register_with_server(self, name, phone):
-        """Serverga ro'yxatdan o'tish - telefon raqam asosiy identifikator"""
+        return str(uuid.uuid4())[:9].upper()
+    
+    def _register(self, name, phone):
         try:
             data = {
-                "client_id": self.client_id,  # Telefon hashidan
+                "client_id": self.client_id,
                 "name": name,
                 "phone": phone,
-                "problem": self.problem_var.get(),
+                "problem": self.problem_combo.get(),
                 "rustdesk_id": self.rustdesk_id,
-                "computer_name": socket.gethostname(),
-                "os_info": f"{platform.system()} {platform.release()} ({platform.machine()})",
-                "client_version": VERSION,
-                "local_ip": self.get_local_ip(),
-                "is_update": "1" if self.already_registered else "0"
+                "hostname": socket.gethostname(),
+                "os_info": f"{platform.system()} {platform.release()}",
+                "version": VERSION,
+                "ip": self._get_local_ip()
             }
             
-            encoded_data = urllib.parse.urlencode(data).encode("utf-8")
-            
-            req = urllib.request.Request(
-                f"{SERVER_URL}/api/agent/register",
-                data=encoded_data, method="POST"
-            )
+            encoded = urllib.parse.urlencode(data).encode()
+            req = urllib.request.Request(f"{SERVER_URL}/api/agent/register",
+                                        data=encoded, method="POST")
             req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            req.add_header("User-Agent", f"UstajonSupport/{VERSION}")
+            req.add_header("User-Agent", f"{APP_NAME}/{VERSION}")
             
-            response = urllib.request.urlopen(req, timeout=30)
-            result = json.loads(response.read().decode("utf-8"))
-            logging.info(f"Server javobi: {result}")
-            return result
-            
+            resp = urllib.request.urlopen(req, timeout=30)
+            return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            return {"success": False, "message": f"HTTP {e.code}"}
         except Exception as e:
-            logging.error(f"Server bilan bog'lanishda xatolik: {str(e)}")
             return {"success": False, "message": str(e)}
-            
-    def get_local_ip(self):
+    
+    def _get_local_ip(self):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -638,145 +752,108 @@ direct-server = "Y"
             return ip
         except:
             return "Unknown"
-            
-    def show_success(self, result):
-        """Muvaffaqiyat oynasi"""
+    
+    def _show_success(self):
         self.progress.stop()
         self.progress.pack_forget()
-        self.btn.set_color("#00aa00")
-        self.btn.set_text("✅ Ulangan")
+        self.submit_btn.set_gradient(("10b981", "34d399"))
+        self.submit_btn.set_text("✓ Ulangan")
         
-        is_update = result.get("is_update", False)
-        
-        if is_update:
-            success_msg = f"""🔄 Qayta ulandi!
-
-🔑 RustDesk ID: {self.rustdesk_id}
-🔐 Parol: {RUSTDESK_PASSWORD}
-
-Admin kompyuteringizga ulana oladi.
-Dasturni yopmang!"""
-        else:
-            success_msg = f"""🎉 Muvaffaqiyatli ro'yxatdan o'tdingiz!
-
-🔑 RustDesk ID: {self.rustdesk_id}
-🔐 Parol: {RUSTDESK_PASSWORD}
-
-Admin tez orada kompyuteringizga ulanadi.
-Iltimos, dasturni yopmang!
-
-📱 Telegram: @ustajonbot
-📞 Qo'ng'iroq: +998912981511"""
-        
-        messagebox.showinfo("Muvaffaqiyat!", success_msg)
-        
-    def reset_button(self):
+        messagebox.showinfo("Muvaffaqiyat!", 
+            f"🎉 Ro'yxatdan o'tdingiz!\n\n"
+            f"🔑 RustDesk ID: {self.rustdesk_id}\n"
+            f"🔐 Parol: {RUSTDESK_PASSWORD}\n\n"
+            f"Mutaxassis tez orada ulanadi.\n"
+            f"Dasturni yopmang!\n\n"
+            f"📱 Telegram: @ustajonbot")
+    
+    def _reset_button(self):
         self.progress.stop()
         self.progress.pack_forget()
-        self.btn.set_color("#00d4ff")
-        self.btn.set_text("🚀 Yordam olish")
-        self.btn.set_enabled(True)
+        self.submit_btn.set_gradient(("6366f1", "8b5cf6"))
+        self.submit_btn.set_text("🚀 Yordam so'rash")
+        self.submit_btn.set_enabled(True)
+    
+    def _start_heartbeat(self):
+        if self.heartbeat_thread and self.heartbeat_thread.is_alive():
+            return
         
-    def start_heartbeat(self):
-        """Server bilan aloqani saqlab turish"""
         def heartbeat_loop():
-            while True:
+            while self.is_connected:
                 try:
                     data = urllib.parse.urlencode({
                         "client_id": self.client_id,
                         "rustdesk_id": self.rustdesk_id,
                         "status": "online",
                         "version": VERSION
-                    }).encode("utf-8")
+                    }).encode()
                     
-                    req = urllib.request.Request(
-                        f"{SERVER_URL}/api/agent/heartbeat",
-                        data=data, method="POST"
-                    )
+                    req = urllib.request.Request(f"{SERVER_URL}/api/agent/heartbeat",
+                                                data=data, method="POST")
                     req.add_header("Content-Type", "application/x-www-form-urlencoded")
-                    response = urllib.request.urlopen(req, timeout=10)
-                    result = json.loads(response.read().decode("utf-8"))
                     
-                    # Agar server "deleted" qaytarsa
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    result = json.loads(resp.read().decode())
+                    
                     if result.get("deleted"):
-                        self.root.after(0, self.handle_deletion)
+                        self.is_connected = False
+                        self.config.set("registered", False)
+                        self.root.after(0, self._handle_deletion)
                         break
                         
                 except Exception as e:
-                    logging.warning(f"Heartbeat xatolik: {str(e)}")
-                    
-                time.sleep(60)
+                    logger.warning(f"Heartbeat error: {e}")
                 
-        threading.Thread(target=heartbeat_loop, daemon=True).start()
-        logging.info("Heartbeat boshlandi")
+                time.sleep(30)
         
-    def handle_deletion(self):
-        """Admin tomonidan o'chirilganda"""
-        self.local_config["registered"] = False
-        self.local_config["active"] = False
-        save_local_config(self.local_config)
-        
-        self.already_registered = False
-        self.connection_status = "disconnected"
-        self.btn.set_color("#00d4ff")
-        self.btn.set_text("🚀 Yordam olish")
-        self.btn.set_enabled(True)
-        
-        messagebox.showinfo("Ma'lumot", 
-            "Sizning muammongiz hal qilingan!\n\n"
-            "Agar yangi muammo bo'lsa, qayta murojaat qilishingiz mumkin.")
-        
-    def run(self):
-        try:
-            icon_path = os.path.join(os.path.dirname(sys.executable), "icon.ico")
-            if os.path.exists(icon_path):
-                self.root.iconbitmap(icon_path)
-        except:
-            pass
-            
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.mainloop()
-        
-    def on_close(self):
-        if self.connection_status == "connected":
-            if messagebox.askyesno("Chiqish", 
+        self.heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
+        logger.info("Heartbeat started")
+    
+    def _handle_deletion(self):
+        self.is_registered = False
+        self._reset_button()
+        self.status.set_status("default", "Tayyor")
+        messagebox.showinfo("Ma'lumot",
+            "Muammongiz hal qilingan!\n\n"
+            "Yangi muammo bo'lsa qayta murojaat qiling.")
+    
+    def _on_close(self):
+        if self.is_connected:
+            if messagebox.askyesno("Chiqish",
                 "Dasturni yopmoqchimisiz?\n"
-                "Admin ulanishi mumkin emas bo'lib qoladi."):
-                logging.info("Dastur yopildi")
+                "Mutaxassis ulanishi mumkin bo'lmaydi."):
                 self.root.destroy()
         else:
             self.root.destroy()
+    
+    def run(self):
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.mainloop()
 
 
 def check_single_instance():
-    """Bitta nusxada ishlashini tekshirish"""
-    lock_file = os.path.join(os.environ.get("TEMP", "."), "ustajon_support.lock")
+    lock = os.path.join(os.environ.get("TEMP", "."), "ustajon.lock")
     try:
-        if os.path.exists(lock_file):
-            with open(lock_file, "r") as f:
-                old_pid = f.read().strip()
+        if os.path.exists(lock):
+            with open(lock) as f:
+                pid = f.read().strip()
             try:
-                result = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {old_pid}"],
-                    capture_output=True, text=True
-                )
-                if old_pid in result.stdout and "UstajonSupport" in result.stdout:
-                    messagebox.showwarning("Ogohlantirish", 
-                        "UstajonSupport allaqachon ishlamoqda!")
+                result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                                       capture_output=True, text=True)
+                if pid in result.stdout:
+                    messagebox.showwarning(APP_NAME, "Dastur allaqachon ishlamoqda!")
                     return False
             except:
                 pass
-                
-        with open(lock_file, "w") as f:
+        with open(lock, "w") as f:
             f.write(str(os.getpid()))
         return True
-        
-    except Exception as e:
-        logging.warning(f"Lock tekshirishda xatolik: {str(e)}")
+    except:
         return True
 
 
 if __name__ == "__main__":
     if check_single_instance():
-        app = UstajonSupport()
+        app = UstajonSupportApp()
         app.run()
