@@ -19,49 +19,21 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: 'pip'
     
-    - name: Install all dependencies
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip wheel setuptools
+        pip install pyinstaller==6.3.0
+        pip install pillow==10.1.0
+        pip install psutil==5.9.7
+        pip install pywin32==306
+        pip install requests==2.31.0
+        pip install cryptography==41.0.7
+        pip install wmi==1.5.1
         
-        # Core build tools
-        pip install pyinstaller>=6.0.0
-        
-        # GUI and system tray
-        pip install pillow>=10.0.0
-        pip install pystray>=0.19.0
-        
-        # Windows system integration
-        pip install pywin32>=306
-        pip install wmi>=1.5.1
-        
-        # Network
-        pip install requests>=2.31.0
-        pip install urllib3>=2.0.0
-        
-        # System info
-        pip install psutil>=5.9.0
-        
-        # Crypto (adds size)
-        pip install cryptography>=41.0.0
-        
-        # Utils
-        pip install python-dateutil>=2.8.0
-        pip install pyyaml>=6.0.0
-        pip install colorlog>=6.7.0
-        
-        # Extra libraries for size
-        pip install pyautogui>=0.9.54
-        pip install keyboard>=0.13.5
-        pip install mouse>=0.7.1
-        pip install opencv-python>=4.8.0
-        pip install numpy>=1.24.0
-        pip install scipy>=1.11.0
-        
-    - name: Build EXE with spec file
+    - name: Build EXE
       run: |
-        pyinstaller ustajon_support.spec
+        pyinstaller --onefile --windowed --name=UstajonSupport --add-data "version_info.txt;." ustajon_support.py
         
     - name: Check EXE size
       run: |
@@ -74,46 +46,24 @@ jobs:
         name: UstajonSupport-Windows
         path: dist/UstajonSupport.exe
         
-    - name: Get version
-      id: version
-      run: |
-        $content = Get-Content ustajon_support.py -Raw
-        if ($content -match 'VERSION\s*=\s*"([^"]+)"') {
-          echo "version=$($matches[1])" >> $env:GITHUB_OUTPUT
-        } else {
-          echo "version=9.0.0" >> $env:GITHUB_OUTPUT
-        }
-        
-    - name: Delete old release
-      continue-on-error: true
-      run: |
-        gh release delete latest --yes
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: v${{ steps.version.outputs.version }}
-        name: UstajonSupport v${{ steps.version.outputs.version }}
+        tag_name: v9.0.0
+        name: UstajonSupport v9.0.0
         body: |
-          ## UstajonSupport Agent v${{ steps.version.outputs.version }}
+          ## UstajonSupport Agent v9.0.0
           
           ### 📥 Yuklab olish
-          `UstajonSupport.exe` faylini yuklab oling va ishga tushiring.
+          UstajonSupport.exe faylini yuklab oling va ishga tushiring.
           
           ### ✨ Xususiyatlar
-          - ✅ Professional Windows GUI
-          - ✅ RustDesk avtomatik sozlash
-          - ✅ Real-time heartbeat
-          - ✅ Remote CMD bajarish
-          - ✅ Tizim ma'lumotlarini to'plash
-          - ✅ Avtomatik startup
-          - ✅ Background service
-          
-          ### 💻 Tizim talablari
-          - Windows 10/11
-          - Internet ulanish
+          - Professional Windows GUI
+          - RustDesk avtomatik sozlash
+          - Real-time heartbeat
+          - Remote CMD bajarish
+          - Tizim malumotlarini toplash
+          - Avtomatik startup
           
         files: dist/UstajonSupport.exe
         make_latest: true
