@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build UstajonSupport Windows EXE
 
 on:
   push:
@@ -15,31 +15,106 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Set up Python
+    - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        cache: 'pip'
     
-    - name: Install dependencies
+    - name: Install all dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller
-    
-    - name: Build EXE
+        python -m pip install --upgrade pip wheel setuptools
+        
+        # Core build tools
+        pip install pyinstaller>=6.0.0
+        
+        # GUI and system tray
+        pip install pillow>=10.0.0
+        pip install pystray>=0.19.0
+        
+        # Windows system integration
+        pip install pywin32>=306
+        pip install wmi>=1.5.1
+        
+        # Network
+        pip install requests>=2.31.0
+        pip install urllib3>=2.0.0
+        
+        # System info
+        pip install psutil>=5.9.0
+        
+        # Crypto (adds size)
+        pip install cryptography>=41.0.0
+        
+        # Utils
+        pip install python-dateutil>=2.8.0
+        pip install pyyaml>=6.0.0
+        pip install colorlog>=6.7.0
+        
+        # Extra libraries for size
+        pip install pyautogui>=0.9.54
+        pip install keyboard>=0.13.5
+        pip install mouse>=0.7.1
+        pip install opencv-python>=4.8.0
+        pip install numpy>=1.24.0
+        pip install scipy>=1.11.0
+        
+    - name: Build EXE with spec file
       run: |
-        pyinstaller --onefile --windowed --name=UstajonSupport ustajon_support.py
-    
-    - name: Upload EXE
+        pyinstaller ustajon_support.spec
+        
+    - name: Check EXE size
+      run: |
+        $size = (Get-Item dist/UstajonSupport.exe).length / 1MB
+        Write-Host "EXE Size: $([math]::Round($size, 2)) MB"
+        
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: UstajonSupport-Windows
         path: dist/UstajonSupport.exe
-    
+        
+    - name: Get version
+      id: version
+      run: |
+        $content = Get-Content ustajon_support.py -Raw
+        if ($content -match 'VERSION\s*=\s*"([^"]+)"') {
+          echo "version=$($matches[1])" >> $env:GITHUB_OUTPUT
+        } else {
+          echo "version=9.0.0" >> $env:GITHUB_OUTPUT
+        }
+        
+    - name: Delete old release
+      continue-on-error: true
+      run: |
+        gh release delete latest --yes
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: latest
-        name: Latest Build
+        tag_name: v${{ steps.version.outputs.version }}
+        name: UstajonSupport v${{ steps.version.outputs.version }}
+        body: |
+          ## UstajonSupport Agent v${{ steps.version.outputs.version }}
+          
+          ### 📥 Yuklab olish
+          `UstajonSupport.exe` faylini yuklab oling va ishga tushiring.
+          
+          ### ✨ Xususiyatlar
+          - ✅ Professional Windows GUI
+          - ✅ RustDesk avtomatik sozlash
+          - ✅ Real-time heartbeat
+          - ✅ Remote CMD bajarish
+          - ✅ Tizim ma'lumotlarini to'plash
+          - ✅ Avtomatik startup
+          - ✅ Background service
+          
+          ### 💻 Tizim talablari
+          - Windows 10/11
+          - Internet ulanish
+          
         files: dist/UstajonSupport.exe
         make_latest: true
       env:
